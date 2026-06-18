@@ -1,7 +1,5 @@
 # Core (needed from Phase 1–5)
 ccxt>=4.2            # unified exchange API + market data
-pandas>=2.2         # data handling
-pandas-ta>=0.3.14b  # technical indicators (pure Python, no TA-Lib C build)
 numpy>=1.26
 PyYAML>=6.0         # config
 python-dotenv>=1.0  # load secrets.env

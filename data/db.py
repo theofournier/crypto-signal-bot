@@ -35,6 +35,9 @@ def connect(db_path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Collectors run one connection per thread; if two briefly contend for the
+    # write lock, wait (up to 5s) rather than raising "database is locked".
+    conn.execute("PRAGMA busy_timeout = 5000")
     init_schema(conn)
     return conn
 
