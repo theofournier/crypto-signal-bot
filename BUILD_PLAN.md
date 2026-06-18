@@ -9,7 +9,7 @@
 > - A working simple slice beats a perfect half-built system. Resist scope creep.
 
 **Prompt to start any phase with Claude Code:**
-> "Read PLAN.md, SPEC-REQUIREMENT.md and BUILD_PLAN.md. We are on Phase N. Implement only the tasks in Phase N,
+> "Read PLAN.md, SPEC-REQUIREMENTS.md and BUILD_PLAN.md. We are on Phase N. Implement only the tasks in Phase N,
 > following the spec exactly. Don't build ahead. Explain what you wrote when done."
 
 ---
