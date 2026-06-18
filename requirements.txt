@@ -9,8 +9,8 @@ python-dotenv>=1.0  # load secrets.env
 # telethon>=1.34     # Telegram
 # feedparser>=6.0    # RSS
 
-# Notifications (Phase 7, optional)
-# python-telegram-bot>=21.0
+# Notifications (Phase 7) — Telegram uses the stdlib (urllib); no extra dep needed.
+# python-dotenv (above) optionally reads TELEGRAM_* from config/secrets.env.
 
 # ML scoring (Phase 10, later) — uncomment when you reach it
 # lightgbm>=4.3

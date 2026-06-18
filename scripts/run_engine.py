@@ -30,7 +30,7 @@ import logging
 import signal as signal_module
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Allow running as a plain script (python3 scripts/run_engine.py).
@@ -41,6 +41,7 @@ from core import risk, scoring  # noqa: E402
 from data import db, seed  # noqa: E402
 from exchange.client import ExchangeClient  # noqa: E402
 from execution import executor, monitor  # noqa: E402
+from notifications.telegram import TelegramNotifier  # noqa: E402
 
 log = logging.getLogger("run_engine")
 
@@ -59,12 +60,19 @@ class ExecutionContext:
     client: ExchangeClient
     risk_gate: risk.RiskGate
     exits_cfg: executor.ExitConfig
+    # Defaults to a disabled notifier so callers/tests can omit it (no-op when off).
+    notifier: TelegramNotifier = field(default_factory=TelegramNotifier.disabled)
 
     @classmethod
     def from_config(cls, conn, cfg: dict) -> "ExecutionContext":
         client = ExchangeClient.from_config(cfg)
         risk_gate = risk.RiskGate(conn, risk.RiskConfig.from_config(cfg), mode=client.mode)
-        return cls(client=client, risk_gate=risk_gate, exits_cfg=executor.ExitConfig.from_config(cfg))
+        return cls(
+            client=client,
+            risk_gate=risk_gate,
+            exits_cfg=executor.ExitConfig.from_config(cfg),
+            notifier=TelegramNotifier.from_config(cfg),
+        )
 
 
 def latest_market_row(conn, symbol: str, timeframe: str):
@@ -131,7 +139,8 @@ def evaluate_pair(
     )
 
     if execution is not None and evaluation.gate_passed:
-        executor.try_open_from_signal(
+        execution.notifier.notify_signal(evaluation.as_row(), execution.client.mode)
+        trade_id = executor.try_open_from_signal(
             conn,
             execution.client,
             execution.risk_gate,
@@ -141,6 +150,10 @@ def evaluate_pair(
             market_row,
             recent_market_rows(conn, symbol, timeframe),
         )
+        if trade_id is not None:
+            opened = db.query(conn, "SELECT * FROM trades WHERE id = ?", (trade_id,))
+            if opened:
+                execution.notifier.notify_trade_opened(opened[0])
     return True
 
 
@@ -160,7 +173,8 @@ def run_pass(
     written = sum(evaluate_pair(conn, p, timeframe, cfg, execution) for p in pairs)
     if execution is not None:
         monitor.monitor_open_trades(
-            conn, execution.client, cfg, execution.exits_cfg, timeframe
+            conn, execution.client, cfg, execution.exits_cfg, timeframe,
+            on_close=execution.notifier.notify_trade_closed,
         )
     return written
 

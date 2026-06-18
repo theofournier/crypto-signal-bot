@@ -142,11 +142,11 @@ P&L, and all five exit types have been observed firing.
 
 **Goal:** you can judge the *system*, not just individual trades.
 
-- [ ] Write `learning/postmortem.py` — compute win rate, avg win ÷ avg loss, net P&L after
+- [x] Write `learning/postmortem.py` — compute win rate, avg win ÷ avg loss, net P&L after
       fees, max drawdown over closed trades.
-- [ ] Add per-source attribution: on losing trades, which sub-scores pointed the wrong way?
-- [ ] Output a weekly summary (print, file, or Telegram).
-- [ ] Write `notifications/telegram.py` to DM yourself signals + the summary (optional but
+- [x] Add per-source attribution: on losing trades, which sub-scores pointed the wrong way?
+- [x] Output a weekly summary (print, file, or Telegram).
+- [x] Write `notifications/telegram.py` to DM yourself signals + the summary (optional but
       recommended).
 
 **Done when:** you get a readable performance summary from the journal and can see which

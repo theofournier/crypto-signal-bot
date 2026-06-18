@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from core import scoring
 from data import db
@@ -260,14 +260,22 @@ def monitor_open_trades(
     scoring_cfg: scoring.ScoringConfig,
     exits_cfg: ExitConfig,
     timeframe: str,
+    on_close: Callable[[Mapping[str, object]], None] | None = None,
 ) -> int:
     """One monitor pass over every open trade in this mode; return how many closed.
 
     Called once per engine cycle after scoring/entry, completing the
     score → risk → execute → **monitor** loop (PLAN §1 runtime shape).
+
+    ``on_close``, if given, is called with the freshly-closed ``trades`` row after
+    each close — the seam the engine uses to notify the operator (FR-NT-1) without
+    this module knowing anything about notifications.
     """
     closed = 0
     for trade in open_trades(conn, client.mode):
         if monitor_trade(conn, client, trade, scoring_cfg, exits_cfg, timeframe) is not None:
             closed += 1
+            if on_close is not None:
+                row = db.query(conn, "SELECT * FROM trades WHERE id = ?", (trade["id"],))
+                on_close(row[0] if row else trade)
     return closed
