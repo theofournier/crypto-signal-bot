@@ -126,12 +126,12 @@ is true.
 
 **Goal:** open trades close correctly via whichever exit fires first.
 
-- [ ] Write `execution/monitor.py` — watch open positions each cycle.
-- [ ] Implement all five exits (PLAN §5.5): stop-loss, take-profit, trailing stop, signal
+- [x] Write `execution/monitor.py` — watch open positions each cycle.
+- [x] Implement all five exits (PLAN §5.5): stop-loss, take-profit, trailing stop, signal
       exit (re-run scoring on open positions), time exit.
-- [ ] On close: fetch fill, compute `pnl`/`pnl_pct` after fees, set `exit_reason`,
+- [x] On close: fetch fill, compute `pnl`/`pnl_pct` after fees, set `exit_reason`,
       `status=closed`, `win`.
-- [ ] Verify each exit type triggers correctly in dry-run with crafted scenarios.
+- [x] Verify each exit type triggers correctly in dry-run with crafted scenarios.
 
 **Done when:** dry trades open AND close, every closed row has a correct `exit_reason` and
 P&L, and all five exit types have been observed firing.

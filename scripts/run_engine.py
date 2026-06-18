@@ -40,7 +40,7 @@ sys.path.insert(0, str(ROOT))
 from core import risk, scoring  # noqa: E402
 from data import db, seed  # noqa: E402
 from exchange.client import ExchangeClient  # noqa: E402
-from execution import executor  # noqa: E402
+from execution import executor, monitor  # noqa: E402
 
 log = logging.getLogger("run_engine")
 
@@ -151,8 +151,18 @@ def run_pass(
     cfg: scoring.ScoringConfig,
     execution: ExecutionContext | None = None,
 ) -> int:
-    """One evaluation pass over all pairs; returns how many signals were written."""
-    return sum(evaluate_pair(conn, p, timeframe, cfg, execution) for p in pairs)
+    """One evaluation pass over all pairs; returns how many signals were written.
+
+    Order is score → risk → execute → **monitor** (PLAN §1): new entries are opened
+    first, then every open position is raced against its exits (Phase 6). Monitoring
+    runs only when an execution context is wired in (Phase 4 callers just score).
+    """
+    written = sum(evaluate_pair(conn, p, timeframe, cfg, execution) for p in pairs)
+    if execution is not None:
+        monitor.monitor_open_trades(
+            conn, execution.client, cfg, execution.exits_cfg, timeframe
+        )
+    return written
 
 
 def main() -> int:

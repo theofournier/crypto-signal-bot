@@ -80,6 +80,27 @@ def insert_many(
     return len(values)
 
 
+def update(
+    conn: sqlite3.Connection,
+    table: str,
+    values: Mapping[str, Any],
+    where: str,
+    where_params: Sequence[Any] = (),
+) -> int:
+    """Update matching rows from a column->value mapping; return rows changed.
+
+    ``where`` is a parameterized clause (e.g. ``"id = ?"``) with its values passed
+    in ``where_params``. Used by the monitor loop to stamp a trade's close
+    (exit price/reason, P&L, status) onto its existing row (PLAN §5.7).
+    """
+    _require_known_table(table)
+    set_clause = ", ".join(f"{col} = ?" for col in values)
+    sql = f"UPDATE {table} SET {set_clause} WHERE {where}"
+    cursor = conn.execute(sql, (*values.values(), *where_params))
+    conn.commit()
+    return cursor.rowcount
+
+
 def query(
     conn: sqlite3.Connection,
     sql: str,
