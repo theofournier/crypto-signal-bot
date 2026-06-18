@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────
+#  PRIVATE — THE EDGE. Never versioned.
+#  A secret committed even once lives in git history forever.
+#  If a key ever leaks into history, ROTATE THE KEY immediately.
+# ──────────────────────────────────────────────────────────────
+
+# Tuned parameters (your strategy = your edge)
+config.yaml
+config/config.yaml
+
+# Secrets / API keys
+secrets.env
+config/secrets.env
+*.env
+!*.example.env          # but DO keep committed templates
+!secrets.example.env
+!config/secrets.example.env
+
+# Database = trade journal + full history (private)
+storage.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Trained ML models (private edge)
+/models/
+
+# Results, reports, logs
+/postmortem_reports/
+/logs/
+*.log
+
+# Downloaded market-data dumps (large + reproducible, not source)
+/data/raw/
+*.csv
+
+# ──────────────────────────────────────────────────────────────
+#  Standard Python
+# ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling / caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

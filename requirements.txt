@@ -1,0 +1,22 @@
+# Core (needed from Phase 1–5)
+ccxt>=4.2            # unified exchange API + market data
+pandas>=2.2         # data handling
+pandas-ta>=0.3.14b  # technical indicators (pure Python, no TA-Lib C build)
+numpy>=1.26
+PyYAML>=6.0         # config
+python-dotenv>=1.0  # load secrets.env
+
+# Sentiment collector (Phase 9) — uncomment when you reach it
+# praw>=7.7          # Reddit
+# telethon>=1.34     # Telegram
+# feedparser>=6.0    # RSS
+
+# Notifications (Phase 7, optional)
+# python-telegram-bot>=21.0
+
+# ML scoring (Phase 10, later) — uncomment when you reach it
+# lightgbm>=4.3
+# scikit-learn>=1.4
+
+# Dev / tests
+pytest>=8.0

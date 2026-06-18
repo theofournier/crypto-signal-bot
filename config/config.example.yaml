@@ -1,0 +1,59 @@
+# ──────────────────────────────────────────────────────────────
+#  config.example.yaml — PUBLIC TEMPLATE (safe defaults)
+#
+#  Copy this to config/config.yaml (which is gitignored) and tune
+#  there. Your tuned config.yaml is your private edge — never commit it.
+#
+#      cp config/config.example.yaml config/config.yaml
+# ──────────────────────────────────────────────────────────────
+
+mode:
+  dry_run: true              # THE most important switch. Keep true until fully validated.
+
+scoring:
+  weights:                   # must sum to ~1.0; tune from your journal over time
+    market: 0.40             # hard data — highest weight
+    onchain: 0.25
+    sentiment: 0.35          # noisy — lower weight
+  threshold: 72              # composite (0–100) must clear this to fire
+  require_agreement: true    # all active sources must agree on direction
+
+risk:
+  kelly_fraction: 0.25       # quarter-Kelly (real edges are smaller than backtests claim)
+  max_open_positions: 3
+  max_drawdown_pause: 0.15   # pause new entries after a 15% drawdown
+  volatility_filter: true
+  min_edge_over_fees: 1.5    # skip signals whose expected move < 1.5x the round-trip fee
+  # starting assumptions used only until the journal has real stats:
+  default_win_rate: 0.50
+  default_reward_risk: 2.0
+
+fees:
+  # Set these to YOUR exchange's tier. Defaults ≈ Binance base spot (0.10%).
+  # Round-trip cost ≈ 2 x (maker or taker). Fees are deducted on EVERY fill,
+  # in dry-run and live alike — otherwise backtests are fiction.
+  maker_pct: 0.0010          # 0.10% — limit orders (you add liquidity)
+  taker_pct: 0.0010          # 0.10% — market orders (you remove liquidity)
+  prefer_maker: true         # enter/exit with limit orders when possible to pay the lower fee
+
+exits:
+  reward_risk_ratio: 2.0     # take-profit distance = 2x the stop distance
+  stop_method: "atr"         # "atr" (volatility-based) or "fixed_pct"
+  stop_fixed_pct: 0.03       # used only if stop_method == "fixed_pct"
+  atr_multiplier: 2.0        # used only if stop_method == "atr"
+  use_trailing_stop: true
+  max_hold_hours: 48         # time-based exit
+
+universe:
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+  timeframe: "1h"
+  exchange: "binance"        # public market data; no key needed for reads
+
+data:
+  history_days: 180          # how much to seed for backtesting
+
+notifications:
+  telegram_enabled: false    # set true and add keys in secrets.env to get alerts
