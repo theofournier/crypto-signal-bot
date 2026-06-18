@@ -69,12 +69,12 @@ insert/select rows.
 
 **Goal:** live market rows flowing in, on closed candles only.
 
-- [ ] Write `collectors/base_collector.py` (the fetch→normalize→write loop from PLAN §5.1).
-- [ ] Write `collectors/market_collector.py` — subscribe to Binance/Bybit WebSocket via CCXT,
+- [x] Write `collectors/base_collector.py` (the fetch→normalize→write loop from PLAN §5.1).
+- [x] Write `collectors/market_collector.py` — subscribe to Binance/Bybit WebSocket via CCXT,
       process **only closed candles**, compute the same derived features as the seed, write
       to `market_data`.
-- [ ] Confirm it never writes a still-forming candle (repainting check).
-- [ ] Wire it into `scripts/run_collectors.py`.
+- [x] Confirm it never writes a still-forming candle (repainting check).
+- [x] Wire it into `scripts/run_collectors.py`.
 
 **Done when:** running collectors appends new live rows to `market_data` continuously, only
 for completed candles, with no decision logic anywhere in the collector.
@@ -85,13 +85,13 @@ for completed candles, with no decision logic anywhere in the collector.
 
 **Goal:** the brain emits signals from data, transparently.
 
-- [ ] Write `core/normalize.py` — turn raw market features into a 0–100 sub-score + direction.
+- [x] Write `core/normalize.py` — turn raw market features into a 0–100 sub-score + direction.
       (On-chain & sentiment sub-scores can return neutral placeholders for now.)
-- [ ] Write `core/scoring.py` — weighted composite + gate exactly per PLAN §5.3, reading
+- [x] Write `core/scoring.py` — weighted composite + gate exactly per PLAN §5.3, reading
       weights/threshold from `config.yaml`.
-- [ ] On each evaluation, write a row to `signals` (including `reason` text) whether or not it
+- [x] On each evaluation, write a row to `signals` (including `reason` text) whether or not it
       fires.
-- [ ] Wire into `scripts/run_engine.py` as the first step of the engine loop.
+- [x] Wire into `scripts/run_engine.py` as the first step of the engine loop.
 
 **Done when:** the engine reads recent `market_data`, scores it, and writes `signals` rows;
 you can read the `reason` and understand every decision.
