@@ -20,11 +20,15 @@ from core.normalize import BEARISH, LONG, NONE
 from data import db
 
 import importlib.util
+import sys
 
-# Load scripts/run_engine.py (not a package) for engine-level tests.
+# Load scripts/run_engine.py (not a package) for engine-level tests. Registering
+# it in sys.modules before exec lets its @dataclass resolve string annotations
+# (PEP 563) — dataclass looks the defining module up there.
 _ENGINE_PATH = __import__("pathlib").Path(__file__).resolve().parent.parent / "scripts" / "run_engine.py"
 _spec = importlib.util.spec_from_file_location("run_engine", _ENGINE_PATH)
 run_engine = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = run_engine
 _spec.loader.exec_module(run_engine)
 
 

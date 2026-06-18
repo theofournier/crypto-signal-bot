@@ -105,16 +105,16 @@ you can read the `reason` and understand every decision.
 
 **Goal:** signals become simulated trades with protection, no real money.
 
-- [ ] Write `exchange/client.py` — CCXT wrapper with the **dry_run switch** (simulate fills +
+- [x] Write `exchange/client.py` — CCXT wrapper with the **dry_run switch** (simulate fills +
       log when `config.mode.dry_run == true`). **Deduct the configured fee on every simulated
       fill** (`config.fees`) exactly as a real exchange would.
-- [ ] Use **limit (maker) orders** for entry where possible to pay the lower fee (PLAN §5.6).
-- [ ] Write `core/risk.py` — exposure/drawdown check, volatility filter, fractional-Kelly
+- [x] Use **limit (maker) orders** for entry where possible to pay the lower fee (PLAN §5.6).
+- [x] Write `core/risk.py` — exposure/drawdown check, volatility filter, fractional-Kelly
       sizing (PLAN §5.4). Add the **fee filter**: skip signals whose expected move is below
       `min_edge_over_fees × round-trip fee`. With no journal yet, use a sane default win_rate/RR.
-- [ ] Write `execution/executor.py` — **atomic** entry + SL/TP, write `trades` row with
+- [x] Write `execution/executor.py` — **atomic** entry + SL/TP, write `trades` row with
       `status=open`, `mode=dry`.
-- [ ] Confirm `dry_run: true` is set and NO real orders are possible.
+- [x] Confirm `dry_run: true` is set and NO real orders are possible.
 
 **Done when:** a gated signal produces a simulated `open` trade in `trades` with SL/TP set,
 fees are deducted on fills, and you've verified no live order path is reachable while dry_run

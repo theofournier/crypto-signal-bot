@@ -23,7 +23,9 @@ risk:
   max_open_positions: 3
   max_drawdown_pause: 0.15   # pause new entries after a 15% drawdown
   volatility_filter: true
+  volatility_spike_mult: 2.5 # sit out when bb_width > 2.5x its recent median (chaotic spike)
   min_edge_over_fees: 1.5    # skip signals whose expected move < 1.5x the round-trip fee
+  bankroll: 10000            # capital used for position sizing (quote currency, e.g. USDT)
   # starting assumptions used only until the journal has real stats:
   default_win_rate: 0.50
   default_reward_risk: 2.0
