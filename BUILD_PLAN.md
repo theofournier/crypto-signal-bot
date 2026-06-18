@@ -9,7 +9,7 @@
 > - A working simple slice beats a perfect half-built system. Resist scope creep.
 
 **Prompt to start any phase with Claude Code:**
-> "Read PLAN.md, SPEC-REQUIREMENTS.md and BUILD_PLAN.md. We are on Phase N. Implement only the tasks in Phase N,
+> "Read PLAN.md, SPEC-REQUIREMENTS.md and BUILD_PLAN.md. Implement only the tasks in Phase N,
 > following the spec exactly. Don't build ahead. Explain what you wrote when done."
 
 ---
@@ -38,11 +38,11 @@ no private file is tracked.
 
 **Goal:** the database exists and you can read/write every table.
 
-- [ ] Write `data/schema.sql` — all 5 tables exactly per PLAN §6.
-- [ ] Write `data/db.py` — connect, init-schema-if-missing, and simple insert/query helpers.
-- [ ] Add a tiny script or test that creates `storage.db`, inserts one dummy row per table,
+- [x] Write `data/schema.sql` — all 5 tables exactly per PLAN §6.
+- [x] Write `data/db.py` — connect, init-schema-if-missing, and simple insert/query helpers.
+- [x] Add a tiny script or test that creates `storage.db`, inserts one dummy row per table,
       and reads it back.
-- [ ] Confirm `storage.db` is gitignored.
+- [x] Confirm `storage.db` is gitignored.
 
 **Done when:** running the init creates `storage.db` with all 5 tables, and you can
 insert/select rows.
@@ -53,13 +53,13 @@ insert/select rows.
 
 **Goal:** months of real `market_data` in the DB so you can build & backtest offline.
 
-- [ ] Write `data/seed.py` + `scripts/seed_data.py` to download Binance Data Vision dumps
+- [x] Write `data/seed.py` + `scripts/seed_data.py` to download Binance Data Vision dumps
       (`data.binance.vision`) for your chosen pairs/timeframe.
-- [ ] Parse the CSVs and load them into `market_data` (compute the derived columns:
+- [x] Parse the CSVs and load them into `market_data` (compute the derived columns:
       `volume_ratio`, `rsi`, `bb_width`, `vwap_distance`, `bid_ask_imbalance` where available).
-- [ ] **Validate on ingest:** detect & log missing intervals, duplicate timestamps, and
+- [x] **Validate on ingest:** detect & log missing intervals, duplicate timestamps, and
       obvious outliers. Don't silently load garbage.
-- [ ] Seed at least a few months for 1 pair (e.g. BTC/USDT, 1h).
+- [x] Seed at least a few months for 1 pair (e.g. BTC/USDT, 1h).
 
 **Done when:** `market_data` holds clean, gap-checked historical rows for at least one pair.
 

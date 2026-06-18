@@ -56,6 +56,27 @@ def insert(conn: sqlite3.Connection, table: str, row: Mapping[str, Any]) -> int:
     return cursor.lastrowid
 
 
+def insert_many(
+    conn: sqlite3.Connection, table: str, rows: Sequence[Mapping[str, Any]]
+) -> int:
+    """Insert many rows in one transaction; return how many were inserted.
+
+    All rows must share the same columns (the first row's keys define them).
+    Used by the seed loader to bulk-load thousands of candles efficiently
+    instead of committing once per row.
+    """
+    _require_known_table(table)
+    if not rows:
+        return 0
+    columns = list(rows[0].keys())
+    placeholders = ", ".join(["?"] * len(columns))
+    sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
+    values = [tuple(row[c] for c in columns) for row in rows]
+    conn.executemany(sql, values)
+    conn.commit()
+    return len(values)
+
+
 def query(
     conn: sqlite3.Connection,
     sql: str,
