@@ -1,0 +1,46 @@
+# ──────────────────────────────────────────────────────────────
+#  .dockerignore — NEVER let secrets or private data into an image.
+#  Docker images can be inspected layer-by-layer; anything copied in
+#  is effectively published. Keep the private edge OUT.
+# ──────────────────────────────────────────────────────────────
+
+# PRIVATE — secrets & tuned config (injected at runtime instead)
+config.yaml
+config/config.yaml
+secrets.env
+config/secrets.env
+*.env
+!*.example.env
+
+# PRIVATE — data, journal, models, results
+storage.db
+*.db
+*.sqlite
+/models/
+/postmortem_reports/
+/logs/
+*.log
+/data/raw/
+*.csv
+
+# Git & CI
+.git/
+.gitignore
+.github/
+
+# Python caches / venvs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Docs not needed in the runtime image (optional)
+*.md

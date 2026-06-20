@@ -1,0 +1,59 @@
+# ──────────────────────────────────────────────────────────────
+#  docker-compose.yml — crypto-signal-bot
+#
+#  KEY SECURITY PROPERTIES:
+#  - NO ports are published → the bot has zero inbound attack surface.
+#    It is a pure outbound client (reaches exchanges/data sources only).
+#  - Secrets are injected at RUNTIME via env_file, never baked into the image.
+#  - Private config + the SQLite journal live in mounted volumes on the host,
+#    never inside the image.
+#  - Both services run as the non-root user defined in the Dockerfile.
+#
+#  Usage:
+#    cp config/config.example.yaml config/config.yaml      # then edit (private)
+#    cp config/secrets.example.env config/secrets.env      # then edit (private)
+#    docker compose up -d --build
+#    docker compose logs -f engine
+# ──────────────────────────────────────────────────────────────
+
+services:
+  collectors:
+    build: .
+    image: crypto-signal-bot:latest
+    container_name: bot-collectors
+    command: python scripts/run_collectors.py
+    restart: unless-stopped
+    env_file:
+      - ./config/secrets.env          # injected at runtime, NOT in the image
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro   # private, read-only
+      - bot-data:/app/data                                # shared persistent data
+      - ./storage.db:/app/storage.db                      # the journal (host-persisted)
+    networks:
+      - botnet
+    # No `ports:` — nothing is exposed to the outside world.
+
+  engine:
+    build: .
+    image: crypto-signal-bot:latest
+    container_name: bot-engine
+    command: python scripts/run_engine.py
+    restart: unless-stopped
+    depends_on:
+      - collectors
+    env_file:
+      - ./config/secrets.env
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - bot-data:/app/data
+      - ./storage.db:/app/storage.db
+    networks:
+      - botnet
+    # No `ports:` here either.
+
+volumes:
+  bot-data:                # named volume for any bot-managed data files
+
+networks:
+  botnet:
+    driver: bridge         # private network; the bot publishes nothing onto it
