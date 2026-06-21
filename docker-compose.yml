@@ -55,12 +55,20 @@ services:
   #   docker compose run --rm init
   #   docker compose run --rm postmortem --days 7 --telegram
   #   docker compose run --rm backtest --pair BTC/USDT --compare
+  #   docker compose run --rm seed
   init:
     <<: *bot-common
     container_name: bot-init
     profiles: ["tools"]
     restart: "no"
     command: python scripts/init_db.py
+
+  seed:
+    <<: *bot-common
+    container_name: bot-seed
+    profiles: ["tools"]
+    restart: "no"
+    command: python scripts/seed_data.py
 
   postmortem:
     <<: *bot-common

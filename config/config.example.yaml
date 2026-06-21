@@ -47,10 +47,20 @@ exits:
   max_hold_hours: 48         # time-based exit
 
 universe:
+  # Watchlist, not a position cap — risk.max_open_positions still bounds how many
+  # of these can be held at once. Widen freely; every pair is scored each cycle.
+  # Keep to liquid pairs with long Binance Data Vision history (seedable offline).
   pairs:
-    - "BTC/USDT"
-    - "ETH/USDT"
-    - "SOL/USDT"
+    - "BTC/USDT"     # anchor — regime reference
+    - "ETH/USDT"     # anchor — risk-on reference
+    - "SOL/USDT"     # workhorse — liquid + volatile
+    - "AVAX/USDT"    # workhorse — volatile L1, deep book
+    - "SUI/USDT"     # workhorse — high realized vol
+    - "NEAR/USDT"    # workhorse — trends cleanly
+    - "LINK/USDT"    # on-chain — real flow signal (oracle/DeFi)
+    - "INJ/USDT"     # volatility — volatile L1 for momentum signals
+    - "DOGE/USDT"    # sentiment — where the social source earns its weight
+    - "TIA/USDT"     # sentiment/vol — narrative-driven
   timeframe: "1h"
   exchange: "binance"        # public market data; no key needed for reads
 
