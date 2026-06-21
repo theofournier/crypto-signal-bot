@@ -21,6 +21,7 @@ from collectors.onchain_collector import (
     ACCUMULATION,
     DISTRIBUTION,
     NEUTRAL,
+    ChainConfig,
     EtherscanSource,
     OnChainCollector,
     OnChainSource,
@@ -215,3 +216,59 @@ def test_etherscan_returns_none_for_uncovered_asset():
 def test_etherscan_unavailable_without_key():
     src = EtherscanSource(api_key="")  # covered asset but no key → unavailable
     assert src.transfers("LINK/USDT", "LINK", NOW - 3600, NOW) is None
+
+
+# ── config-driven, multichain registry ───────────────────────────
+def test_chainconfig_normalizes_case():
+    c = ChainConfig.from_dict("bsc", {
+        "chain_id": 56,
+        "cex_addresses": ["0xABCDEF0000000000000000000000000000000001"],
+        "tokens": {"foo": "0xFEED000000000000000000000000000000000002"},
+    })
+    assert c.chain_id == 56
+    assert c.cex_addresses == ("0xabcdef0000000000000000000000000000000001",)
+    assert c.tokens == {"FOO": "0xfeed000000000000000000000000000000000002"}  # key upper, val lower
+
+
+def test_from_config_uses_custom_chains():
+    cfg = {"chains": {"poly": {"chain_id": 137, "cex_addresses": [EXCHANGE],
+                               "tokens": {"FOO": "0xfoo"}}}}
+    src = EtherscanSource.from_config(cfg, api_key="k")
+    assert [c.name for c in src.chains] == ["poly"]
+    assert src.chains[0].chain_id == 137
+
+
+def test_from_config_falls_back_to_defaults_when_no_chains():
+    src = EtherscanSource.from_config({}, api_key="k")
+    assert any(c.name == "ethereum" for c in src.chains)
+    assert any("LINK" in c.tokens for c in src.chains)
+
+
+def test_covered_config_token_is_queried(monkeypatch):
+    """A token listed in config is queried (returns a list); an unlisted one is None."""
+    cfg = {"chains": {"poly": {"chain_id": 137, "cex_addresses": [EXCHANGE],
+                               "tokens": {"FOO": "0xfoo"}}}}
+    src = EtherscanSource.from_config(cfg, api_key="k")
+    monkeypatch.setattr(src, "_get_tokentx", lambda *a, **k: {"status": "1", "result": []})
+
+    assert src.transfers("FOO/USDT", "FOO", NOW - 3600, NOW) == []   # covered, no transfers
+    assert src.transfers("BAR/USDT", "BAR", NOW - 3600, NOW) is None  # not in registry
+
+
+def test_asset_on_two_chains_is_summed(monkeypatch):
+    """A token configured on two chains aggregates transfers from both."""
+    cfg = {"chains": {
+        "a": {"chain_id": 1, "cex_addresses": [EXCHANGE], "tokens": {"FOO": "0xa"}},
+        "b": {"chain_id": 56, "cex_addresses": [EXCHANGE], "tokens": {"FOO": "0xb"}},
+    }}
+    src = EtherscanSource.from_config(cfg, api_key="k")
+    seen_chains = []
+
+    def fake_get(chain_id, address, contract):
+        seen_chains.append(chain_id)
+        return {"status": "1", "result": [_tx(NOW, 10**18, EXCHANGE, "0xother")]}
+
+    monkeypatch.setattr(src, "_get_tokentx", fake_get)
+    transfers = src.transfers("FOO/USDT", "FOO", NOW - 3600, NOW)
+    assert len(transfers) == 2            # one per chain
+    assert sorted(seen_chains) == [1, 56]  # both chains queried

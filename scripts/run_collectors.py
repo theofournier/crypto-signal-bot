@@ -97,8 +97,12 @@ def main() -> int:
     onchain_cfg = cfg.get("onchain", {})
     onchain_enabled = bool(onchain_cfg.get("enabled", True)) and not args.no_onchain
     onchain_kwargs = _onchain_kwargs(onchain_cfg)
+    onchain_source = None
     if onchain_enabled:
         load_secrets_into_env()  # so EtherscanSource finds ETHERSCAN_API_KEY
+        # Stateless (config + stdlib HTTP) → one instance is safely shared by all
+        # pair threads; the chains/tokens registry comes from onchain.chains.
+        onchain_source = EtherscanSource.from_config(onchain_cfg)
 
     log.info("collectors: %s @ %s on %s (on-chain: %s)",
              pairs, timeframe, exchange_name, "on" if onchain_enabled else "off")
@@ -112,16 +116,15 @@ def main() -> int:
                     conn, symbol=p, timeframe=timeframe, exchange_name=exchange_name
                 ).run_once()
             if onchain_enabled:
-                source = EtherscanSource()
                 for p in pairs:
                     OnChainCollector(
-                        conn, symbol=p, source=source, timeframe=timeframe, **onchain_kwargs
+                        conn, symbol=p, source=onchain_source, timeframe=timeframe, **onchain_kwargs
                     ).run_once()
         finally:
             conn.close()
         return 0
 
-    _run_forever(pairs, timeframe, exchange_name, onchain_enabled, onchain_kwargs)
+    _run_forever(pairs, timeframe, exchange_name, onchain_source, onchain_kwargs)
     return 0
 
 
@@ -141,17 +144,18 @@ def _market_worker(symbol: str, timeframe: str, exchange_name: str, stop: thread
         conn.close()
 
 
-def _onchain_worker(symbol: str, timeframe: str, kwargs: dict, stop: threading.Event) -> None:
-    """Run one pair's on-chain collector with its OWN connection + source.
+def _onchain_worker(symbol, timeframe, source, kwargs, stop: threading.Event) -> None:
+    """Run one pair's on-chain collector with its OWN connection.
 
-    Same per-thread isolation as the market worker. The Etherscan source reads its
-    key from the environment (loaded from secrets.env in ``main``); without a key
-    it degrades to writing nothing, never a crash (FR-DC-4).
+    The SQLite connection is per-thread (it cannot be shared); the on-chain
+    ``source`` is stateless config + stdlib HTTP, so all pairs share one instance.
+    Without an API key the source degrades to writing nothing, never a crash
+    (FR-DC-4).
     """
     conn = db.connect()
     try:
         OnChainCollector(
-            conn, symbol=symbol, source=EtherscanSource(), timeframe=timeframe, **kwargs
+            conn, symbol=symbol, source=source, timeframe=timeframe, **kwargs
         ).run(stop)
     finally:
         conn.close()
@@ -161,7 +165,7 @@ def _run_forever(
     pairs: list[str],
     timeframe: str,
     exchange_name: str,
-    onchain_enabled: bool,
+    onchain_source,
     onchain_kwargs: dict,
 ) -> None:
     """One thread per (collector, pair); stop them all cleanly on Ctrl-C/SIGTERM."""
@@ -176,10 +180,10 @@ def _run_forever(
         )
         for p in pairs
     ]
-    if onchain_enabled:
+    if onchain_source is not None:
         threads += [
             threading.Thread(
-                target=_onchain_worker, args=(p, timeframe, onchain_kwargs, stop),
+                target=_onchain_worker, args=(p, timeframe, onchain_source, onchain_kwargs, stop),
                 name=f"onchain:{p}", daemon=True,
             )
             for p in pairs

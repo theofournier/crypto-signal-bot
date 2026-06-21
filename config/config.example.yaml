@@ -66,13 +66,41 @@ universe:
 
 onchain:
   # On-chain collector (Phase 9): exchange in/out flow + whale transfers -> onchain_data.
-  # The free Etherscan source covers ERC-20 assets only (needs ETHERSCAN_API_KEY in
-  # secrets.env); uncovered assets (BTC, native ETH, SOL, …) simply write nothing.
+  # The free Etherscan source covers ERC-20 tokens on EVM chains only (needs
+  # ETHERSCAN_API_KEY in secrets.env); uncovered assets (BTC, native ETH, SOL, …)
+  # simply write nothing.
   enabled: true              # set false (or run with --no-onchain) to skip it
   poll_seconds: 300          # slow — on-chain APIs rate-limit
   window_hours: 1            # aggregate exchange flows over this trailing window
   whale_usd: 1000000         # a single transfer >= this USD counts as a whale move
   flow_deadband: 0.05        # |net_flow| below this fraction of gross flow => neutral
+
+  # Coverage registry — EDIT HERE, no code change needed. One block per EVM chain
+  # (Etherscan v2 serves them all from one key by chain_id). For each chain list
+  # its known CEX hot wallets and map each base asset to its token contract on that
+  # chain. An asset matched on several chains is summed across them. To track a new
+  # token: add it under the right chain's `tokens:`. To add a chain (BSC=56,
+  # Polygon=137, Arbitrum=42161, Base=8453, …): add a block with its `chain_id`,
+  # that chain's CEX wallets, and tokens.
+  chains:
+    ethereum:
+      chain_id: 1
+      cex_addresses:        # known CEX hot wallets (more = better flow coverage)
+        - "0x28c6c06298d514db089934071355e5743bf21d60"  # Binance 14
+        - "0x21a31ee1afc51d94c2efccaa2092ad1028285549"  # Binance 15
+        - "0xdfd5293d8e347dfe59e90efd55b2956a1343963d"  # Binance 16
+        - "0x56eddb7aa87536c09ccc2793473599fd21a8b17f"  # Binance 17
+      tokens:               # base asset -> ERC-20 contract on this chain
+        LINK: "0x514910771af9ca656af840dff83e8264ecf986ca"
+        UNI:  "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984"
+        AAVE: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+    # Example second chain (uncomment + fill to enable BSC flow tracking):
+    # bsc:
+    #   chain_id: 56
+    #   cex_addresses:
+    #     - "0x..."          # Binance BSC hot wallet(s)
+    #   tokens:
+    #     LINK: "0x..."       # LINK on BSC
 
 data:
   history_days: 180          # how much to seed for backtesting
