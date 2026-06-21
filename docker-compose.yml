@@ -54,6 +54,7 @@ services:
   # ── One-shot helpers — run on demand, never with `up`. ──
   #   docker compose run --rm init
   #   docker compose run --rm postmortem --days 7 --telegram
+  #   docker compose run --rm backtest --pair BTC/USDT --compare
   init:
     <<: *bot-common
     container_name: bot-init
@@ -67,6 +68,13 @@ services:
     profiles: ["tools"]
     restart: "no"
     command: python scripts/run_postmortem.py
+
+  backtest:
+    <<: *bot-common
+    container_name: bot-backtest
+    profiles: ["tools"]
+    restart: "no"
+    command: python scripts/run_backtest.py
 
 networks:
   botnet:

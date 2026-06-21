@@ -18,16 +18,16 @@
 
 **Goal:** a public repo that's safe from the very first commit; secrets & edge can never leak.
 
-- [ ] `git init` and create the GitHub repo (public).
-- [ ] Create `.gitignore` FIRST (copy from PLAN §8) and commit it before anything else.
-- [ ] Add `LICENSE` (MIT recommended).
-- [ ] Add `README.md` with: one-line description, **educational/not-financial-advice
+- [x] `git init` and create the GitHub repo (public).
+- [x] Create `.gitignore` FIRST (copy from PLAN §8) and commit it before anything else.
+- [x] Add `LICENSE` (MIT recommended).
+- [x] Add `README.md` with: one-line description, **educational/not-financial-advice
       disclaimer**, the public/private split note, and "always dry-run first" in bold.
-- [ ] Create the empty folder structure from PLAN §4 (with `__init__.py` where needed).
-- [ ] Add `requirements.txt` (start minimal: `ccxt`, `pandas`, `pandas-ta`, `pyyaml`,
+- [x] Create the empty folder structure from PLAN §4 (with `__init__.py` where needed).
+- [x] Add `requirements.txt` (start minimal: `ccxt`, `pandas`, `pandas-ta`, `pyyaml`,
       `python-dotenv`).
-- [ ] Add `config/config.example.yaml` (from PLAN §9) and `config/secrets.example.env`.
-- [ ] Verify `git status` shows NO `config.yaml`, `secrets.env`, or `*.db`.
+- [x] Add `config/config.example.yaml` (from PLAN §9) and `config/secrets.example.env`.
+- [x] Verify `git status` shows NO `config.yaml`, `secrets.env`, or `*.db`.
 
 **Done when:** repo is public, first commit contains `.gitignore`, and a `git status` proves
 no private file is tracked.
@@ -158,13 +158,13 @@ source is helping vs hurting.
 
 **Goal:** trust the end-to-end loop on one pair before widening anything.
 
-- [ ] Run collectors + engine together on **one pair** in dry-run for **at least one week**.
-- [ ] Confirm the whole chain works unattended: data in → signals → dry trades → exits →
+- [x] Run collectors + engine together on **one pair** in dry-run for **at least one week**.
+- [x] Confirm the whole chain works unattended: data in → signals → dry trades → exits →
       journal → postmortem.
-- [ ] Write `learning/backtest.py` — replay historical `market_data` rows through the SAME
+- [x] Write `learning/backtest.py` — replay historical `market_data` rows through the SAME
       `core/scoring.py` and compare results to the live dry-run. **The backtest must deduct
       fees on every simulated trade** — a fee-free backtest is fiction.
-- [ ] Add `tests/` with at least a lookahead/leakage check (no future data in decisions).
+- [x] Add `tests/` with at least a lookahead/leakage check (no future data in decisions).
 - [ ] Read the postmortem. Hand-tune weights/threshold in `config.yaml` and observe the effect.
 
 **Done when:** the system runs hands-off for a week in dry-run, backtest and dry-run results

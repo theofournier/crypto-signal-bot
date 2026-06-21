@@ -43,7 +43,7 @@ exits:
   stop_method: "atr"         # "atr" (volatility-based) or "fixed_pct"
   stop_fixed_pct: 0.03       # used only if stop_method == "fixed_pct"
   atr_multiplier: 2.0        # used only if stop_method == "atr"
-  use_trailing_stop: true
+  use_trailing_stop: false
   max_hold_hours: 48         # time-based exit
 
 universe:

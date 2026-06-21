@@ -63,13 +63,26 @@ class ExitConfig:
         )
 
 
+def _get(row: Mapping[str, object], key: str) -> object:
+    """Read a column from a dict or sqlite3.Row, returning None if absent.
+
+    sqlite3.Row has no ``.get`` and raises IndexError for an unknown column; a dict
+    raises KeyError. Unifying both lets ``_atr`` accept the Row objects the live
+    engine (and the backtest) pass straight from the DB, not only plain dicts.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def _atr(candles: Sequence[Mapping[str, object]], period: int = ATR_PERIOD) -> float | None:
     """Average True Range over the most recent ``period`` candles, or None.
 
     ``candles`` are ``market_data`` rows oldest→newest. True range uses the prior
     close, so at least ``period + 1`` candles with OHLC are required.
     """
-    rows = [c for c in candles if c.get("high") is not None and c.get("low") is not None]
+    rows = [c for c in candles if _get(c, "high") is not None and _get(c, "low") is not None]
     if len(rows) < period + 1:
         return None
     trs: list[float] = []
