@@ -55,6 +55,53 @@ cp config/secrets.example.env config/secrets.env
 
 ---
 
+## Docker deployment (VPS)
+
+Runs two long-lived services — `collectors` (writes market data) and `engine` (scores,
+gates, executes) — as a non-root user. **No ports are published**: the bot is an
+outbound-only client, so it has zero inbound attack surface. Secrets are injected at
+runtime; your private `config.yaml` and the `storage.db` journal are host bind-mounts,
+never baked into the image.
+
+```bash
+# 0. One-time: install Docker Engine + the compose plugin
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker "$USER" && newgrp docker   # run docker without sudo
+
+# 1. Clone + create your private files (gitignored, so not in the clone)
+git clone https://github.com/<you>/crypto-signal-bot
+cd crypto-signal-bot
+cp config/config.example.yaml config/config.yaml   # tune it; keep dry_run: true
+cp config/secrets.example.env config/secrets.env   # fill in keys / Telegram
+
+# 2. Create the journal file FIRST, then build + init the DB schema.
+#    (storage.db is bind-mounted as a single file — if it doesn't exist yet,
+#     Docker would create a *directory* at that path and the bot would break.)
+touch storage.db
+docker compose build
+docker compose run --rm init
+
+# 3. Launch
+docker compose up -d
+docker compose logs -f engine          # or: logs -f collectors
+```
+
+Day-to-day:
+
+```bash
+docker compose ps                                    # status
+docker compose logs -f engine                        # follow logs
+git pull && docker compose up -d --build             # redeploy after changes
+docker compose run --rm postmortem --days 7 --telegram
+docker compose down                                  # stop everything
+```
+
+Back up the journal with a plain `cp storage.db storage.db.bak` — it holds your full
+trade history. The `init` and `postmortem` one-shots live behind the `tools` compose
+profile, so they never start with `up`.
+
+---
+
 ## Public framework, private edge
 
 This repo is open source from the first commit. The split is deliberate and enforced by

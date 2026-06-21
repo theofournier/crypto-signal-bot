@@ -1,34 +1,31 @@
+# syntax=docker/dockerfile:1
 # ──────────────────────────────────────────────────────────────
-#  Dockerfile — crypto-signal-bot
-#  - slim Python base
+#  crypto-signal-bot image
+#  - slim Python base, pinned to the version the project was built on
 #  - runs as a NON-ROOT user
-#  - NO secrets and NO private config are ever baked in (see .dockerignore)
-#  - secrets/config are mounted/injected at RUNTIME via docker-compose
+#  - NO secrets / NO private config baked in (see .dockerignore);
+#    config + secrets are supplied at RUNTIME by docker-compose
 # ──────────────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-# Don't write .pyc files; flush stdout so logs stream to `docker logs`
+# Don't write .pyc files; stream stdout/stderr straight to `docker logs`.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# System deps kept minimal. git only if you install any VCS deps; drop if not needed.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create an unprivileged user to run the bot
-RUN useradd --create-home --uid 10001 botuser
 WORKDIR /app
 
-# Install Python deps first (better layer caching)
+# Install Python deps first so this layer is cached across code changes.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy only the application code (private files are excluded by .dockerignore)
+# Copy the application code (private files are excluded by .dockerignore).
 COPY . .
 
-# Drop privileges
+# Run unprivileged. Create the user after copying, then own /app so the
+# bot can write its SQLite journal / data files at runtime.
+RUN useradd --create-home --uid 10001 botuser \
+    && chown -R botuser:botuser /app
 USER botuser
 
-# Default command is overridden per-service in docker-compose.yml
+# Overridden per-service in docker-compose.yml.
 CMD ["python", "scripts/run_engine.py"]
