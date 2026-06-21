@@ -11,6 +11,7 @@ Usage:
     python3 scripts/run_collectors.py --pair BTC/USDT --timeframe 1h
     python3 scripts/run_collectors.py --once          # one cycle then exit (smoke test)
     python3 scripts/run_collectors.py --no-onchain    # market collectors only
+    python3 scripts/run_collectors.py --no-market     # on-chain collectors only
 
 Reads the asset universe from config/config.yaml, falling back to the committed
 config/config.example.yaml. Requires ccxt for live exchange access; the on-chain
@@ -80,6 +81,7 @@ def main() -> int:
     parser.add_argument("--exchange", help="override exchange (e.g. binance)")
     parser.add_argument("--once", action="store_true", help="run one cycle per pair then exit")
     parser.add_argument("--no-onchain", action="store_true", help="run market collectors only")
+    parser.add_argument("--no-market", action="store_true", help="run on-chain collectors only")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -94,6 +96,8 @@ def main() -> int:
     timeframe = args.timeframe or universe.get("timeframe", "1h")
     exchange_name = args.exchange or universe.get("exchange", "binance")
 
+    market_enabled = not args.no_market
+
     onchain_cfg = cfg.get("onchain", {})
     onchain_enabled = bool(onchain_cfg.get("enabled", True)) and not args.no_onchain
     onchain_kwargs = _onchain_kwargs(onchain_cfg)
@@ -104,17 +108,23 @@ def main() -> int:
         # pair threads; the chains/tokens registry comes from onchain.chains.
         onchain_source = EtherscanSource.from_config(onchain_cfg)
 
-    log.info("collectors: %s @ %s on %s (on-chain: %s)",
-             pairs, timeframe, exchange_name, "on" if onchain_enabled else "off")
+    if not market_enabled and not onchain_enabled:
+        log.error("nothing to run: --no-market and on-chain both disabled")
+        return 2
+
+    log.info("collectors: %s @ %s on %s (market: %s, on-chain: %s)",
+             pairs, timeframe, exchange_name,
+             "on" if market_enabled else "off", "on" if onchain_enabled else "off")
 
     if args.once:
         # Single-threaded smoke test: one connection in this thread is fine.
         conn = db.connect()
         try:
-            for p in pairs:
-                MarketCollector(
-                    conn, symbol=p, timeframe=timeframe, exchange_name=exchange_name
-                ).run_once()
+            if market_enabled:
+                for p in pairs:
+                    MarketCollector(
+                        conn, symbol=p, timeframe=timeframe, exchange_name=exchange_name
+                    ).run_once()
             if onchain_enabled:
                 for p in pairs:
                     OnChainCollector(
@@ -124,7 +134,7 @@ def main() -> int:
             conn.close()
         return 0
 
-    _run_forever(pairs, timeframe, exchange_name, onchain_source, onchain_kwargs)
+    _run_forever(pairs, timeframe, exchange_name, market_enabled, onchain_source, onchain_kwargs)
     return 0
 
 
@@ -165,6 +175,7 @@ def _run_forever(
     pairs: list[str],
     timeframe: str,
     exchange_name: str,
+    market_enabled: bool,
     onchain_source,
     onchain_kwargs: dict,
 ) -> None:
@@ -173,13 +184,15 @@ def _run_forever(
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
-    threads = [
-        threading.Thread(
-            target=_market_worker, args=(p, timeframe, exchange_name, stop),
-            name=f"market:{p}", daemon=True,
-        )
-        for p in pairs
-    ]
+    threads = []
+    if market_enabled:
+        threads += [
+            threading.Thread(
+                target=_market_worker, args=(p, timeframe, exchange_name, stop),
+                name=f"market:{p}", daemon=True,
+            )
+            for p in pairs
+        ]
     if onchain_source is not None:
         threads += [
             threading.Thread(
