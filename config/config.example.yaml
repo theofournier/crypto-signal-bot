@@ -64,6 +64,16 @@ universe:
   timeframe: "1h"
   exchange: "binance"        # public market data; no key needed for reads
 
+onchain:
+  # On-chain collector (Phase 9): exchange in/out flow + whale transfers -> onchain_data.
+  # The free Etherscan source covers ERC-20 assets only (needs ETHERSCAN_API_KEY in
+  # secrets.env); uncovered assets (BTC, native ETH, SOL, …) simply write nothing.
+  enabled: true              # set false (or run with --no-onchain) to skip it
+  poll_seconds: 300          # slow — on-chain APIs rate-limit
+  window_hours: 1            # aggregate exchange flows over this trailing window
+  whale_usd: 1000000         # a single transfer >= this USD counts as a whale move
+  flow_deadband: 0.05        # |net_flow| below this fraction of gross flow => neutral
+
 data:
   history_days: 180          # how much to seed for backtesting
 

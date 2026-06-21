@@ -1,23 +1,27 @@
-"""Launch the live collectors (BUILD_PLAN Phase 3).
+"""Launch the live collectors (BUILD_PLAN Phase 3 / Phase 9).
 
-In Phase 3 there is one collector: the market collector. It runs one independent
-loop per configured pair (FR-DC-4 — a failure on one pair never stalls another),
-each appending closed candles to ``market_data``. On-chain and sentiment
-collectors arrive in Phase 9 and slot in here the same way.
+Each collector runs one independent loop per configured pair (FR-DC-4 — a failure
+on one pair never stalls another): the **market** collector appends closed candles
+to ``market_data``, and (Phase 9) the **on-chain** collector appends exchange-flow
+observations to ``onchain_data``. The sentiment collector slots in here the same
+way once built.
 
 Usage:
     python3 scripts/run_collectors.py                 # pairs/timeframe from config
     python3 scripts/run_collectors.py --pair BTC/USDT --timeframe 1h
     python3 scripts/run_collectors.py --once          # one cycle then exit (smoke test)
+    python3 scripts/run_collectors.py --no-onchain    # market collectors only
 
 Reads the asset universe from config/config.yaml, falling back to the committed
-config/config.example.yaml. Requires ccxt for live exchange access.
+config/config.example.yaml. Requires ccxt for live exchange access; the on-chain
+collector needs ETHERSCAN_API_KEY in secrets.env (it degrades to a no-op without).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -28,34 +32,54 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from collectors.market_collector import MarketCollector  # noqa: E402
+from collectors.onchain_collector import OnChainCollector, EtherscanSource  # noqa: E402
+from core import scoring  # noqa: E402 — reuse the one canonical config loader
 from data import db  # noqa: E402
 
 log = logging.getLogger("run_collectors")
 
 
-def load_universe() -> dict:
-    """Read ``universe`` from config.yaml, falling back to config.example.yaml.
+def load_secrets_into_env() -> None:
+    """Load config/secrets.env (gitignored) into the process environment.
 
-    Keeps the safe public template usable out of the box (FR-CF-2) while letting
-    the operator's private config.yaml override it without code changes (FR-CF-1).
+    So the on-chain source picks up ``ETHERSCAN_API_KEY`` without each component
+    reimplementing dotenv parsing. Real environment variables win over the file,
+    and a missing file is fine (the source degrades to a no-op — FR-DC-4).
     """
-    import yaml  # local import: only the runner needs PyYAML
-
-    cfg_dir = ROOT / "config"
-    path = cfg_dir / "config.yaml"
+    path = ROOT / "config" / "secrets.env"
     if not path.exists():
-        path = cfg_dir / "config.example.yaml"
-        log.warning("config.yaml not found; using %s defaults", path.name)
-    cfg = yaml.safe_load(path.read_text()) or {}
-    return cfg.get("universe", {})
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and value:
+            os.environ.setdefault(key, value)
+
+
+def _onchain_kwargs(onchain_cfg: dict) -> dict:
+    """Translate the config ``onchain`` block into OnChainCollector kwargs."""
+    kwargs: dict = {}
+    if "poll_seconds" in onchain_cfg:
+        kwargs["interval"] = float(onchain_cfg["poll_seconds"])
+    if "window_hours" in onchain_cfg:
+        kwargs["window_seconds"] = int(float(onchain_cfg["window_hours"]) * 3600)
+    if "whale_usd" in onchain_cfg:
+        kwargs["whale_usd"] = float(onchain_cfg["whale_usd"])
+    if "flow_deadband" in onchain_cfg:
+        kwargs["flow_deadband"] = float(onchain_cfg["flow_deadband"])
+    return kwargs
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run live market collectors")
+    parser = argparse.ArgumentParser(description="Run live collectors (market + on-chain)")
     parser.add_argument("--pair", action="append", help="override pair(s); repeatable")
     parser.add_argument("--timeframe", help="override timeframe (e.g. 1h)")
     parser.add_argument("--exchange", help="override exchange (e.g. binance)")
     parser.add_argument("--once", action="store_true", help="run one cycle per pair then exit")
+    parser.add_argument("--no-onchain", action="store_true", help="run market collectors only")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -64,12 +88,20 @@ def main() -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    universe = load_universe()
+    cfg = scoring.load_config()
+    universe = cfg.get("universe", {})
     pairs = args.pair or universe.get("pairs", ["BTC/USDT"])
     timeframe = args.timeframe or universe.get("timeframe", "1h")
     exchange_name = args.exchange or universe.get("exchange", "binance")
 
-    log.info("collectors: %s @ %s on %s", pairs, timeframe, exchange_name)
+    onchain_cfg = cfg.get("onchain", {})
+    onchain_enabled = bool(onchain_cfg.get("enabled", True)) and not args.no_onchain
+    onchain_kwargs = _onchain_kwargs(onchain_cfg)
+    if onchain_enabled:
+        load_secrets_into_env()  # so EtherscanSource finds ETHERSCAN_API_KEY
+
+    log.info("collectors: %s @ %s on %s (on-chain: %s)",
+             pairs, timeframe, exchange_name, "on" if onchain_enabled else "off")
 
     if args.once:
         # Single-threaded smoke test: one connection in this thread is fine.
@@ -79,16 +111,22 @@ def main() -> int:
                 MarketCollector(
                     conn, symbol=p, timeframe=timeframe, exchange_name=exchange_name
                 ).run_once()
+            if onchain_enabled:
+                source = EtherscanSource()
+                for p in pairs:
+                    OnChainCollector(
+                        conn, symbol=p, source=source, timeframe=timeframe, **onchain_kwargs
+                    ).run_once()
         finally:
             conn.close()
         return 0
 
-    _run_forever(pairs, timeframe, exchange_name)
+    _run_forever(pairs, timeframe, exchange_name, onchain_enabled, onchain_kwargs)
     return 0
 
 
-def _worker(symbol: str, timeframe: str, exchange_name: str, stop: threading.Event) -> None:
-    """Run one pair's collector with its OWN connection + exchange.
+def _market_worker(symbol: str, timeframe: str, exchange_name: str, stop: threading.Event) -> None:
+    """Run one pair's market collector with its OWN connection + exchange.
 
     A SQLite connection can only be used in the thread that created it, so each
     collector opens its own here (cheap; SQLite handles multiple connections to
@@ -103,22 +141,52 @@ def _worker(symbol: str, timeframe: str, exchange_name: str, stop: threading.Eve
         conn.close()
 
 
-def _run_forever(pairs: list[str], timeframe: str, exchange_name: str) -> None:
-    """One thread per pair; stop them all cleanly on Ctrl-C/SIGTERM."""
+def _onchain_worker(symbol: str, timeframe: str, kwargs: dict, stop: threading.Event) -> None:
+    """Run one pair's on-chain collector with its OWN connection + source.
+
+    Same per-thread isolation as the market worker. The Etherscan source reads its
+    key from the environment (loaded from secrets.env in ``main``); without a key
+    it degrades to writing nothing, never a crash (FR-DC-4).
+    """
+    conn = db.connect()
+    try:
+        OnChainCollector(
+            conn, symbol=symbol, source=EtherscanSource(), timeframe=timeframe, **kwargs
+        ).run(stop)
+    finally:
+        conn.close()
+
+
+def _run_forever(
+    pairs: list[str],
+    timeframe: str,
+    exchange_name: str,
+    onchain_enabled: bool,
+    onchain_kwargs: dict,
+) -> None:
+    """One thread per (collector, pair); stop them all cleanly on Ctrl-C/SIGTERM."""
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
     threads = [
         threading.Thread(
-            target=_worker, args=(p, timeframe, exchange_name, stop),
+            target=_market_worker, args=(p, timeframe, exchange_name, stop),
             name=f"market:{p}", daemon=True,
         )
         for p in pairs
     ]
+    if onchain_enabled:
+        threads += [
+            threading.Thread(
+                target=_onchain_worker, args=(p, timeframe, onchain_kwargs, stop),
+                name=f"onchain:{p}", daemon=True,
+            )
+            for p in pairs
+        ]
     for t in threads:
         t.start()
-    log.info("running %d collector(s); Ctrl-C to stop", len(threads))
+    log.info("running %d collector thread(s); Ctrl-C to stop", len(threads))
     while not stop.wait(1.0):
         pass
     log.info("shutting down")

@@ -79,21 +79,45 @@ class Evaluation:
         }
 
 
-def load_config(path: str | Path | None = None) -> dict:
-    """Load the full config dict from ``config.yaml`` (fallback example template).
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively overlay ``override`` onto ``base`` (override wins at every leaf).
 
-    Centralizes the read so the engine reuses one loader for both ``scoring`` and
-    ``universe`` (FR-CF-1/2). PyYAML is imported lazily — only a real run needs it.
+    Nested dicts merge key-by-key so ``config.yaml`` need only carry the values it
+    changes; everything else falls through to the ``base`` (example) defaults. A
+    non-dict override (including a list) replaces the base value wholesale.
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(path: str | Path | None = None) -> dict:
+    """Load config, layering ``config.yaml`` over the ``config.example.yaml`` base.
+
+    The committed example is the **defaults** layer; the operator's gitignored
+    ``config.yaml`` only needs to carry the values it overrides — any key it omits
+    falls back to the example (FR-CF-1/2). This means adding a new setting to the
+    example template makes it available to everyone without each operator having to
+    copy it into their private ``config.yaml``.
+
+    An explicit ``path`` (used by tests) is loaded as-is, with no layering. PyYAML
+    is imported lazily — only a real run needs it.
     """
     import yaml  # local import: only the engine runner needs PyYAML
 
     if path is not None:
-        cfg_path = Path(path)
-    else:
-        cfg_path = CONFIG_DIR / "config.yaml"
-        if not cfg_path.exists():
-            cfg_path = CONFIG_DIR / "config.example.yaml"
-    return yaml.safe_load(Path(cfg_path).read_text()) or {}
+        return yaml.safe_load(Path(path).read_text()) or {}
+
+    example = yaml.safe_load((CONFIG_DIR / "config.example.yaml").read_text()) or {}
+    override_path = CONFIG_DIR / "config.yaml"
+    if not override_path.exists():
+        return example
+    override = yaml.safe_load(override_path.read_text()) or {}
+    return _deep_merge(example, override)
 
 
 def scoring_config(cfg: dict) -> ScoringConfig:
