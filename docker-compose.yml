@@ -16,8 +16,18 @@
 #  First-run + usage instructions are in README / the deploy notes.
 # ──────────────────────────────────────────────────────────────
 
+# The container runs as a non-root user whose UID/GID match the HOST user that
+# owns the bind-mounted storage.db / config.yaml — otherwise SQLite hits
+# "attempt to write a readonly database". On a host where `id -u` isn't 1000,
+# pin them once before building:
+#     printf "PUID=%s\nPGID=%s\n" "$(id -u)" "$(id -g)" > .env
+# Compose auto-loads .env; rebuild (`up -d --build`) after changing it.
 x-bot-common: &bot-common
-  build: .
+  build:
+    context: .
+    args:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
   image: crypto-signal-bot:latest
   restart: unless-stopped
   env_file:

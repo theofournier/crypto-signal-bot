@@ -74,14 +74,18 @@ cd crypto-signal-bot
 cp config/config.example.yaml config/config.yaml   # tune it; keep dry_run: true
 cp config/secrets.example.env config/secrets.env   # fill in keys / Telegram
 
-# 2. Create the journal file FIRST, then build + init the DB schema.
+# 2. Match the container's user to your host user so the non-root process can
+#    write the bind-mounted DB (skip only if `id -u` is exactly 1000).
+printf "PUID=%s\nPGID=%s\n" "$(id -u)" "$(id -g)" > .env
+
+# 3. Create the journal file FIRST, then build + init the DB schema.
 #    (storage.db is bind-mounted as a single file — if it doesn't exist yet,
 #     Docker would create a *directory* at that path and the bot would break.)
 touch storage.db
 docker compose build
 docker compose run --rm init
 
-# 3. Launch
+# 4. Launch
 docker compose up -d
 docker compose logs -f engine          # or: logs -f collectors
 ```

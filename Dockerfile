@@ -21,9 +21,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code (private files are excluded by .dockerignore).
 COPY . .
 
-# Run unprivileged. Create the user after copying, then own /app so the
-# bot can write its SQLite journal / data files at runtime.
-RUN useradd --create-home --uid 10001 botuser \
+# Run unprivileged. Match the container user's UID/GID to the HOST user that owns
+# the bind-mounted files (config.yaml, storage.db) so this non-root process can
+# write the SQLite journal. Defaults to 1000:1000 (the typical first VPS user);
+# override via PUID/PGID build args — see the .env note in docker-compose.yml.
+ARG PUID=1000
+ARG PGID=1000
+RUN groupadd --gid "${PGID}" botuser \
+    && useradd --create-home --uid "${PUID}" --gid "${PGID}" botuser \
     && chown -R botuser:botuser /app
 USER botuser
 
