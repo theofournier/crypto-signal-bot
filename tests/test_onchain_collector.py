@@ -22,26 +22,34 @@ from collectors.onchain_collector import (
     DISTRIBUTION,
     NEUTRAL,
     ChainConfig,
+    CompositeSource,
+    DefiLlamaSource,
     EtherscanSource,
     OnChainCollector,
     OnChainSource,
     Transfer,
+    TransferSource,
+    build_source,
     parse_tokentx,
     summarize_flows,
+    tvl_reading,
 )
 from data import db
 
 NOW = 1_704_067_200  # 2024-01-01 00:00:00 UTC (seconds)
 
 
-class FakeSource(OnChainSource):
-    """Returns a fixed transfer list (or None to mean 'asset not covered')."""
+class FakeSource(TransferSource):
+    """A transfer source returning a fixed list (None == 'asset not covered')."""
 
     def __init__(self, transfers):
         self._transfers = transfers
         self.calls = 0
 
-    def transfers(self, symbol, base_asset, since_ts, now_ts):
+    def covers(self, base_asset):
+        return self._transfers is not None
+
+    def transfers(self, base_asset, since_ts, now_ts):
         self.calls += 1
         return self._transfers
 
@@ -210,12 +218,14 @@ def test_parse_skips_malformed_and_handles_no_results():
 # ── Etherscan source coverage gate ───────────────────────────────
 def test_etherscan_returns_none_for_uncovered_asset():
     src = EtherscanSource(api_key="dummy")
-    assert src.transfers("BTC/USDT", "BTC", NOW - 3600, NOW) is None
+    assert src.covers("BTC") is False
+    assert src.transfers("BTC", NOW - 3600, NOW) is None
 
 
 def test_etherscan_unavailable_without_key():
     src = EtherscanSource(api_key="")  # covered asset but no key → unavailable
-    assert src.transfers("LINK/USDT", "LINK", NOW - 3600, NOW) is None
+    assert src.covers("LINK") is True
+    assert src.transfers("LINK", NOW - 3600, NOW) is None
 
 
 # ── config-driven, multichain registry ───────────────────────────
@@ -251,8 +261,8 @@ def test_covered_config_token_is_queried(monkeypatch):
     src = EtherscanSource.from_config(cfg, api_key="k")
     monkeypatch.setattr(src, "_get_tokentx", lambda *a, **k: {"status": "1", "result": []})
 
-    assert src.transfers("FOO/USDT", "FOO", NOW - 3600, NOW) == []   # covered, no transfers
-    assert src.transfers("BAR/USDT", "BAR", NOW - 3600, NOW) is None  # not in registry
+    assert src.transfers("FOO", NOW - 3600, NOW) == []   # covered, no transfers
+    assert src.transfers("BAR", NOW - 3600, NOW) is None  # not in registry
 
 
 def test_asset_on_two_chains_is_summed(monkeypatch):
@@ -269,6 +279,73 @@ def test_asset_on_two_chains_is_summed(monkeypatch):
         return {"status": "1", "result": [_tx(NOW, 10**18, EXCHANGE, "0xother")]}
 
     monkeypatch.setattr(src, "_get_tokentx", fake_get)
-    transfers = src.transfers("FOO/USDT", "FOO", NOW - 3600, NOW)
+    transfers = src.transfers("FOO", NOW - 3600, NOW)
     assert len(transfers) == 2            # one per chain
     assert sorted(seen_chains) == [1, 56]  # both chains queried
+
+
+# ── DefiLlama source: chain TVL momentum ─────────────────────────
+def _tvl(date, tvl):
+    return {"date": str(date), "tvl": tvl}
+
+
+def test_tvl_reading_rising_is_accumulation():
+    pts = [_tvl(NOW - 86400, 1_000_000_000.0), _tvl(NOW, 1_200_000_000.0)]
+    r = tvl_reading(pts, now_ts=NOW, lookback_seconds=86400, deadband=0.05)
+    assert r["net_flow"] == pytest.approx(200_000_000.0)
+    assert r["flow_signal"] == ACCUMULATION
+    # a TVL source does not measure CEX flows / whales → honest NULLs
+    assert r["exchange_inflow"] is None and r["whale_tx_count"] is None
+
+
+def test_tvl_reading_falling_is_distribution():
+    pts = [_tvl(NOW - 86400, 1_000_000_000.0), _tvl(NOW, 900_000_000.0)]
+    r = tvl_reading(pts, now_ts=NOW, lookback_seconds=86400, deadband=0.05)
+    assert r["flow_signal"] == DISTRIBUTION
+
+
+def test_tvl_reading_flat_is_neutral_and_empty_is_none():
+    pts = [_tvl(NOW - 86400, 1_000_000_000.0), _tvl(NOW, 1_010_000_000.0)]  # +1% < 5%
+    assert tvl_reading(pts, NOW, 86400, 0.05)["flow_signal"] == NEUTRAL
+    assert tvl_reading([], NOW, 86400, 0.05) is None
+
+
+def test_defillama_covers_l1_not_erc20_governance():
+    src = DefiLlamaSource()
+    assert src.covers("SOL") is True      # native L1 → chain TVL
+    assert src.covers("LINK") is False    # ERC-20 governance token → not a chain
+
+
+def test_defillama_read_uses_tvl(monkeypatch):
+    src = DefiLlamaSource(chains={"SOL": "Solana"}, lookback_seconds=86400)
+    monkeypatch.setattr(src, "_get_chain_tvl",
+                        lambda slug: [_tvl(NOW - 86400, 1e9), _tvl(NOW, 1.3e9)])
+    r = src.read("SOL", NOW - 3600, NOW, price_usd=None, whale_usd=0, deadband=0.05)
+    assert r["flow_signal"] == ACCUMULATION
+    assert src.read("DOGE", NOW - 3600, NOW, price_usd=None, whale_usd=0, deadband=0.05) is None
+
+
+# ── composing sources + build_source ─────────────────────────────
+def test_composite_routes_to_first_covering_source():
+    etherscan = EtherscanSource(api_key="k")              # covers LINK, not SOL
+    defillama = DefiLlamaSource()                          # covers SOL, not LINK
+    comp = CompositeSource([etherscan, defillama])
+    assert comp.covers("LINK") and comp.covers("SOL")
+    assert comp.covers("DOGE") is False
+
+
+def test_build_source_assembles_providers():
+    cfg = {"providers": ["etherscan", "defillama"]}
+    src = build_source(cfg, api_key="k")
+    assert isinstance(src, CompositeSource)
+    assert src.covers("LINK")   # via etherscan
+    assert src.covers("SOL")    # via defillama
+
+
+def test_build_source_single_provider_is_not_wrapped():
+    src = build_source({"providers": ["defillama"]})
+    assert isinstance(src, DefiLlamaSource)
+
+
+def test_build_source_unknown_provider_skipped():
+    assert build_source({"providers": ["nope"]}) is None

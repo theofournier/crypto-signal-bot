@@ -15,25 +15,28 @@ obeys the two non-negotiables (PLAN §2):
     asset the source cannot cover, a missing API key, or a transient outage yields
     an empty cycle (nothing written) — never a crash, and never fabricated data.
 
-**Pluggable source.** The actual data provider is injected (mirroring how
+**Pluggable, composable sources.** The data provider is injected (mirroring how
 ``market_collector`` injects its CCXT ``exchange``) so the collector is testable
-without a network and the operator can swap providers without touching this loop.
-The shipped default, :class:`EtherscanSource`, reads real ERC-20 transfer logs to
-and from known centralized-exchange (CEX) hot wallets via Etherscan's free
-**multichain** v2 API (one ``ETHERSCAN_API_KEY`` in ``secrets.env`` covers every
-EVM chain by ``chainid``). The plan also names DefiLlama; it is a fine alternative
-source — implement :class:`OnChainSource` and inject it.
+without a network and providers swap without touching this loop. Two real sources
+ship, and they are **complementary** (combined via :class:`CompositeSource`, first
+to cover an asset wins):
+
+  * :class:`EtherscanSource` — real CEX inflow/outflow + whale transfers for
+    **ERC-20 tokens** on any EVM chain, via Etherscan's free multichain v2 API
+    (one ``ETHERSCAN_API_KEY`` in ``secrets.env`` covers every chain by ``chainid``).
+  * :class:`DefiLlamaSource` — **chain TVL momentum** (rising = accumulation,
+    falling = distribution) for native L1/L2 coins (SOL, AVAX, ETH, …), free and
+    keyless. This covers exactly the native coins Etherscan cannot.
 
 **Config-driven, honest coverage.** Real per-asset CEX flow without a paid
-analytics provider (Glassnode/CryptoQuant/Nansen) is genuinely hard. The free
-Etherscan path covers **ERC-20 tokens on EVM chains whose contract + CEX hot
-wallets are listed** under ``onchain.chains`` in config.yaml (a small starter
-registry, :data:`DEFAULT_CHAINS`, is used when config provides none). Add chains
-(BSC, Polygon, Arbitrum, …) and tokens there — **no code change needed**. Native
-coins (BTC, native ETH, SOL, …) live on non-EVM ledgers and are simply *not
-covered* here: the source returns ``None`` for them and the collector writes
-nothing, leaving their on-chain sub-score inactive/neutral — the graceful
-degradation FR-DC-4 wants, not a silent fake.
+analytics provider (Glassnode/CryptoQuant/Nansen) is genuinely hard, so coverage
+is partial and explicit. Both sources read their registries from config
+(``onchain.etherscan.chains`` / ``onchain.defillama.chains``) — add tokens/chains
+there with **no code change**; built-in starter registries are used when config
+omits them. An asset no source covers returns ``None`` and the collector writes
+nothing, leaving its on-chain sub-score inactive/neutral — the graceful
+degradation FR-DC-4 wants, not a silent fake. Each source fills only the columns
+it actually measures (a TVL source leaves the CEX-flow columns ``NULL``).
 
 **Units.** A provider reports transfers in *token units*; the schema stores USD.
 The collector converts using the latest ``market_data`` close for the asset (reuse
@@ -85,20 +88,72 @@ class Transfer:
 class OnChainSource(ABC):
     """A pluggable on-chain data provider. Implement and inject your own.
 
-    The contract is deliberately tiny: given an asset and a time window, return
-    the CEX transfers in that window, or ``None`` if this provider does not cover
-    the asset (so the collector can degrade gracefully — FR-DC-4).
+    A source answers two questions: does it **cover** an asset, and (if so) what is
+    the asset's on-chain **reading** over a window? The reading is the directional
+    essence the engine cares about — different sources measure it differently (CEX
+    transfer flow vs. ecosystem TVL momentum), so each returns the row payload
+    directly rather than a single raw shape. ``None`` from ``read`` means "no data
+    this cycle" (uncovered, or a transient gap) — the collector then writes nothing,
+    degrading gracefully (FR-DC-4).
+    """
+
+    @abstractmethod
+    def covers(self, base_asset: str) -> bool:
+        """True if this source can produce a reading for ``base_asset``."""
+
+    @abstractmethod
+    def read(
+        self,
+        base_asset: str,
+        since_ts: int,
+        now_ts: int,
+        *,
+        price_usd: float | None,
+        whale_usd: float,
+        deadband: float,
+    ) -> dict | None:
+        """The on-chain reading for ``base_asset`` (the ``onchain_data`` flow
+        columns) over ``[since_ts, now_ts]``, or ``None`` if unavailable.
+
+        ``price_usd`` (latest market close, or ``None``) lets token-unit sources
+        convert to USD; sources already denominated in USD ignore it. ``whale_usd``
+        and ``deadband`` are the reduction knobs each source applies as relevant.
+        """
+
+
+class TransferSource(OnChainSource):
+    """Base for sources that observe **CEX transfers** (Etherscan, future explorers).
+
+    Subclasses implement :meth:`transfers` (raw, token-unit transfers to/from CEX
+    wallets); this base reduces them to USD flows via :func:`summarize_flows`. A
+    token-unit source needs a price to convert, so ``read`` skips the cycle when
+    ``price_usd`` is missing — a normal, non-error outcome (FR-DC-4).
     """
 
     @abstractmethod
     def transfers(
-        self, symbol: str, base_asset: str, since_ts: int, now_ts: int
+        self, base_asset: str, since_ts: int, now_ts: int
     ) -> list[Transfer] | None:
         """CEX transfers for ``base_asset`` in ``[since_ts, now_ts]`` (token units).
 
-        Returns ``None`` when the asset is not covered by this source (vs ``[]``
-        which means "covered, but no transfers in the window").
+        Returns ``None`` when the asset is not covered (vs ``[]`` = "covered, no
+        transfers in the window").
         """
+
+    def read(
+        self,
+        base_asset: str,
+        since_ts: int,
+        now_ts: int,
+        *,
+        price_usd: float | None,
+        whale_usd: float,
+        deadband: float,
+    ) -> dict | None:
+        txs = self.transfers(base_asset, since_ts, now_ts)
+        if txs is None or price_usd is None:
+            return None  # uncovered, or no price yet to convert token units to USD
+        return summarize_flows(txs, price_usd, whale_usd, deadband)
 
 
 class OnChainCollector(BaseCollector):
@@ -132,40 +187,37 @@ class OnChainCollector(BaseCollector):
         self.flow_deadband = flow_deadband
         self._now = now_fn
 
-    # ── fetch (talk to the source; no DB access) ───────────────────
-    def fetch(self) -> list[Transfer] | None:
-        """Pull CEX transfers for this asset over the trailing window.
+    # ── fetch (ask the source for a reading) ───────────────────────
+    def fetch(self) -> dict | None:
+        """Get this asset's on-chain reading over the trailing window, or ``None``.
 
-        ``None`` means "this source does not cover the asset" — distinct from an
-        empty list ("covered, no transfers"). Both result in nothing written, but
-        only the former is logged as an uncovered asset.
+        Resolves the latest price from the DB (so token-unit sources can convert to
+        USD — reuse through the single source of truth, PLAN §2.2) and hands it to
+        the source. ``None`` when the asset is covered by no source, or a source has
+        no data this cycle — both mean "write nothing" (FR-DC-4).
         """
+        if not self.source.covers(self.base_asset):
+            self.log.debug("%s not covered by any on-chain source; skipping", self.base_asset)
+            return None
         now = int(self._now())
-        return self.source.transfers(
-            self.symbol, self.base_asset, now - self.window_seconds, now
+        return self.source.read(
+            self.base_asset,
+            now - self.window_seconds,
+            now,
+            price_usd=self._latest_price_usd(),
+            whale_usd=self.whale_usd,
+            deadband=self.flow_deadband,
         )
 
-    # ── normalize (shape into a row; converts to USD via the DB) ────
-    def normalize(self, raw: list[Transfer] | None) -> list[Mapping[str, Any]]:
-        """Transfers -> one ``onchain_data`` row (USD flows + directional signal).
-
-        Skips the cycle (writes nothing) when the asset is uncovered, or when no
-        price is stored yet to convert token units to USD — both normal,
-        non-error outcomes that keep the source independent (FR-DC-4).
-        """
-        if raw is None:
-            self.log.debug("%s not covered by source; skipping", self.base_asset)
+    # ── normalize (stamp the reading into a row) ───────────────────
+    def normalize(self, reading: dict | None) -> list[Mapping[str, Any]]:
+        """A source reading -> one ``onchain_data`` row (or nothing to write)."""
+        if reading is None:
             return []
-
-        price = self._latest_price_usd()
-        if price is None:
-            self.log.debug("no market price yet for %s; skipping on-chain cycle", self.symbol)
-            return []
-
-        reading = summarize_flows(raw, price, self.whale_usd, self.flow_deadband)
-        reading["ts"] = int(self._now())
-        reading["symbol"] = self.symbol
-        return [reading]
+        row = dict(reading)
+        row["ts"] = int(self._now())
+        row["symbol"] = self.symbol
+        return [row]
 
     # ── helpers ─────────────────────────────────────────────────────
     def _latest_price_usd(self) -> float | None:
@@ -233,12 +285,13 @@ def summarize_flows(
 
 ETHERSCAN_BASE_URL = "https://api.etherscan.io/v2/api"  # unified multichain v2
 
-# Built-in starter registry, used when config provides no ``onchain.chains``. One
-# entry per EVM chain; Etherscan's v2 API serves them all from one key by
+# Built-in starter registry, used when config provides no ``onchain.etherscan.chains``.
+# One entry per EVM chain; Etherscan's v2 API serves them all from one key by
 # ``chainid``. ``cex_addresses`` are that chain's known CEX hot wallets and
 # ``tokens`` maps a base asset to its contract on that chain. Edit these in
-# config.yaml (``onchain.chains``) — no code change needed. Native coins (BTC,
-# native ETH, SOL, …) live on non-EVM ledgers and are intentionally absent.
+# config.yaml (``onchain.etherscan.chains``) — no code change needed. Native coins
+# (BTC, native ETH, SOL, …) live on non-EVM ledgers and are intentionally absent
+# (DefiLlama covers several of those via chain TVL — see :class:`DefiLlamaSource`).
 DEFAULT_CHAINS: dict[str, dict[str, Any]] = {
     "ethereum": {
         "chain_id": 1,
@@ -280,8 +333,8 @@ class ChainConfig:
         )
 
 
-class EtherscanSource(OnChainSource):
-    """Real on-chain flows from Etherscan's free **multichain** tier (ERC-20 only).
+class EtherscanSource(TransferSource):
+    """Real CEX flows from Etherscan's free **multichain** tier (ERC-20 only).
 
     For a covered token it queries each known CEX hot wallet's token transfers
     (``action=tokentx``) on the chain that token lives on, classifying each as
@@ -290,9 +343,10 @@ class EtherscanSource(OnChainSource):
     the collector degrades gracefully (FR-DC-4).
 
     Coverage is config-driven via :class:`ChainConfig` (built from
-    ``onchain.chains`` in config.yaml, or :data:`DEFAULT_CHAINS` otherwise), so the
-    operator edits addresses/tokens without touching code. ``urllib`` is the only
-    non-pure part — parsing stays in the pure :func:`parse_tokentx`.
+    ``onchain.etherscan.chains`` in config.yaml, or :data:`DEFAULT_CHAINS`
+    otherwise), so the operator edits addresses/tokens without touching code. The
+    base :class:`TransferSource` reduces the transfers to USD flows; ``urllib`` is
+    the only non-pure part — parsing stays in the pure :func:`parse_tokentx`.
     """
 
     def __init__(
@@ -316,10 +370,10 @@ class EtherscanSource(OnChainSource):
 
     @classmethod
     def from_config(
-        cls, onchain_cfg: Mapping[str, Any] | None, api_key: str | None = None, **kwargs: Any
+        cls, etherscan_cfg: Mapping[str, Any] | None, api_key: str | None = None, **kwargs: Any
     ) -> "EtherscanSource":
-        """Build from the config ``onchain`` block (uses ``DEFAULT_CHAINS`` if none)."""
-        chains_cfg = (onchain_cfg or {}).get("chains")
+        """Build from the ``onchain.etherscan`` block (uses ``DEFAULT_CHAINS`` if none)."""
+        chains_cfg = (etherscan_cfg or {}).get("chains")
         chains = (
             [ChainConfig.from_dict(name, d or {}) for name, d in chains_cfg.items()]
             if chains_cfg
@@ -327,8 +381,12 @@ class EtherscanSource(OnChainSource):
         )
         return cls(api_key=api_key, chains=chains, **kwargs)
 
+    def covers(self, base_asset: str) -> bool:
+        key = base_asset.upper()
+        return any(key in c.tokens for c in self.chains)
+
     def transfers(
-        self, symbol: str, base_asset: str, since_ts: int, now_ts: int
+        self, base_asset: str, since_ts: int, now_ts: int
     ) -> list[Transfer] | None:
         key = base_asset.upper()
         # Every (chain, contract) this asset is configured on (usually exactly one).
@@ -401,3 +459,195 @@ def parse_tokentx(
         elif frm == addr:
             transfers.append(Transfer(ts=ts, amount=amount, direction="out"))
     return transfers
+
+
+# ── alternative source: DefiLlama free TVL momentum (no key, multi-chain) ─────
+
+DEFILLAMA_BASE_URL = "https://api.llama.fi"
+DEFAULT_DEFILLAMA_LOOKBACK_DAYS = 1  # compare TVL now vs this many days ago
+
+# base asset -> DefiLlama chain slug. Covers L1/L2 ecosystems Etherscan cannot
+# (native coins on non-EVM chains). Edit in config.yaml (``onchain.defillama.chains``).
+DEFAULT_DEFILLAMA_CHAINS: dict[str, str] = {
+    "ETH": "Ethereum",
+    "SOL": "Solana",
+    "AVAX": "Avalanche",
+    "NEAR": "Near",
+    "SUI": "Sui",
+    "INJ": "Injective",
+    "BTC": "Bitcoin",
+}
+
+
+class DefiLlamaSource(OnChainSource):
+    """On-chain reading from **DefiLlama chain TVL momentum** (free, no key).
+
+    DefiLlama does not expose per-asset CEX flows, so this source measures a
+    *different but real* on-chain signal: the change in **total value locked** on
+    the chain a token anchors. Rising ecosystem TVL = capital flowing in
+    (accumulation lean); falling = capital leaving (distribution lean). This
+    naturally covers native L1/L2 coins (SOL, AVAX, ETH, …) that the ERC-20-only
+    :class:`EtherscanSource` cannot.
+
+    The reading fills ``net_flow`` (ΔTVL in USD) and ``flow_signal``; the
+    CEX-specific columns (``exchange_inflow``/``outflow``/``whale_tx_count``) are
+    left ``None`` — honestly "not measured by this source", not faked. ``urllib``
+    is the only non-pure part; the reduction lives in the pure :func:`tvl_reading`.
+    """
+
+    def __init__(
+        self,
+        chains: Mapping[str, str] | None = None,
+        lookback_seconds: int = DEFAULT_DEFILLAMA_LOOKBACK_DAYS * 86400,
+        base_url: str = DEFILLAMA_BASE_URL,
+        timeout: float = 15.0,
+    ) -> None:
+        src = chains if chains is not None else DEFAULT_DEFILLAMA_CHAINS
+        self.chains = {k.upper(): str(v) for k, v in src.items()}
+        self.lookback_seconds = lookback_seconds
+        self.base_url = base_url
+        self.timeout = timeout
+        self.log = logging.getLogger("collector.onchain.defillama")
+
+    @classmethod
+    def from_config(
+        cls, defillama_cfg: Mapping[str, Any] | None, **kwargs: Any
+    ) -> "DefiLlamaSource":
+        """Build from the ``onchain.defillama`` block (uses defaults if absent)."""
+        cfg = defillama_cfg or {}
+        chains = cfg.get("chains")  # None -> DEFAULT_DEFILLAMA_CHAINS
+        if "lookback_days" in cfg:
+            kwargs["lookback_seconds"] = int(float(cfg["lookback_days"]) * 86400)
+        return cls(chains=chains, **kwargs)
+
+    def covers(self, base_asset: str) -> bool:
+        return base_asset.upper() in self.chains
+
+    def read(
+        self,
+        base_asset: str,
+        since_ts: int,
+        now_ts: int,
+        *,
+        price_usd: float | None = None,  # unused: TVL is already USD-denominated
+        whale_usd: float = 0.0,          # unused: no transfer-level data
+        deadband: float = DEFAULT_FLOW_DEADBAND,
+    ) -> dict | None:
+        slug = self.chains.get(base_asset.upper())
+        if slug is None:
+            return None
+        try:
+            points = self._get_chain_tvl(slug)
+        except Exception:  # noqa: BLE001 — a transient outage skips this cycle, never crashes
+            self.log.exception("defillama chain TVL failed for %s; skipping", slug)
+            return None
+        return tvl_reading(points, now_ts, self.lookback_seconds, deadband)
+
+    def _get_chain_tvl(self, chain_slug: str) -> list[Mapping[str, Any]]:
+        """Daily [{date, tvl}, …] history for a chain (DefiLlama, no key)."""
+        url = f"{self.base_url}/v2/historicalChainTvl/{urllib.parse.quote(chain_slug)}"
+        with urllib.request.urlopen(url, timeout=self.timeout) as resp:  # noqa: S310 - fixed https host
+            return json.loads(resp.read().decode())
+
+
+def tvl_reading(
+    points: Sequence[Mapping[str, Any]], now_ts: int, lookback_seconds: int, deadband: float
+) -> dict | None:
+    """Reduce a chain's TVL history to a net-flow + directional reading (pure).
+
+    ``net_flow`` = TVL at ``now_ts`` minus TVL ``lookback_seconds`` earlier (USD).
+    Positive (TVL grew) reads as accumulation, negative as distribution, with a
+    deadband (fraction of current TVL) so flat TVL is neutral. Malformed points are
+    skipped; too little data returns ``None``.
+    """
+    parsed: list[tuple[int, float]] = []
+    for p in points:
+        try:
+            parsed.append((int(p["date"]), float(p["tvl"])))
+        except (KeyError, ValueError, TypeError):
+            continue  # skip malformed point rather than load garbage
+    if not parsed:
+        return None
+    parsed.sort()
+
+    at_or_before_now = [v for d, v in parsed if d <= now_ts]
+    tvl_now = at_or_before_now[-1] if at_or_before_now else parsed[-1][1]
+    at_or_before_then = [v for d, v in parsed if d <= now_ts - lookback_seconds]
+    tvl_then = at_or_before_then[-1] if at_or_before_then else parsed[0][1]
+
+    net_flow = tvl_now - tvl_then
+    if tvl_now > 0 and abs(net_flow) >= deadband * tvl_now:
+        signal = ACCUMULATION if net_flow > 0 else DISTRIBUTION
+    else:
+        signal = NEUTRAL
+    return {
+        "exchange_inflow": None,   # not measured by a TVL source (honest NULL)
+        "exchange_outflow": None,
+        "net_flow": net_flow,
+        "whale_tx_count": None,
+        "flow_signal": signal,
+    }
+
+
+# ── composing sources ───────────────────────────────────────────────
+
+class CompositeSource(OnChainSource):
+    """Try several sources in order; the first that **covers** an asset serves it.
+
+    Lets complementary providers coexist — e.g. Etherscan for ERC-20 governance
+    tokens, DefiLlama for native L1 coins — so each asset is read by whichever
+    source actually has data for it.
+    """
+
+    def __init__(self, sources: Sequence[OnChainSource]) -> None:
+        self.sources = list(sources)
+
+    def covers(self, base_asset: str) -> bool:
+        return any(s.covers(base_asset) for s in self.sources)
+
+    def read(
+        self,
+        base_asset: str,
+        since_ts: int,
+        now_ts: int,
+        *,
+        price_usd: float | None,
+        whale_usd: float,
+        deadband: float,
+    ) -> dict | None:
+        for source in self.sources:
+            if source.covers(base_asset):
+                return source.read(
+                    base_asset, since_ts, now_ts,
+                    price_usd=price_usd, whale_usd=whale_usd, deadband=deadband,
+                )
+        return None
+
+
+# provider name -> builder from its config sub-block (api_key injected where needed).
+_PROVIDER_BUILDERS = {
+    "etherscan": lambda cfg, api_key: EtherscanSource.from_config(cfg.get("etherscan", {}), api_key=api_key),
+    "defillama": lambda cfg, api_key: DefiLlamaSource.from_config(cfg.get("defillama", {})),
+}
+
+
+def build_source(onchain_cfg: Mapping[str, Any] | None, api_key: str | None = None) -> OnChainSource | None:
+    """Assemble the on-chain source from the config ``onchain`` block.
+
+    ``onchain.providers`` lists the sources to use, in priority order (default:
+    ``["etherscan"]``). Returns a single source, a :class:`CompositeSource` when
+    several are configured, or ``None`` if none resolve.
+    """
+    cfg = onchain_cfg or {}
+    names = cfg.get("providers") or ["etherscan"]
+    log = logging.getLogger("collector.onchain")
+    built: list[OnChainSource] = []
+    for name in names:
+        builder = _PROVIDER_BUILDERS.get(str(name).lower())
+        if builder is None:
+            log.warning("unknown on-chain provider %r; skipping", name)
+            continue
+        built.append(builder(cfg, api_key))
+    if not built:
+        return None
+    return built[0] if len(built) == 1 else CompositeSource(built)

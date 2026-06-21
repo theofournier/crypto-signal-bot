@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from collectors.market_collector import MarketCollector  # noqa: E402
-from collectors.onchain_collector import OnChainCollector, EtherscanSource  # noqa: E402
+from collectors.onchain_collector import OnChainCollector, build_source  # noqa: E402
 from core import scoring  # noqa: E402 — reuse the one canonical config loader
 from data import db  # noqa: E402
 
@@ -105,8 +105,12 @@ def main() -> int:
     if onchain_enabled:
         load_secrets_into_env()  # so EtherscanSource finds ETHERSCAN_API_KEY
         # Stateless (config + stdlib HTTP) → one instance is safely shared by all
-        # pair threads; the chains/tokens registry comes from onchain.chains.
-        onchain_source = EtherscanSource.from_config(onchain_cfg)
+        # pair threads. build_source assembles the providers listed in
+        # onchain.providers (etherscan and/or defillama) into one source.
+        onchain_source = build_source(onchain_cfg)
+        if onchain_source is None:
+            log.warning("on-chain enabled but no providers resolved; disabling")
+            onchain_enabled = False
 
     if not market_enabled and not onchain_enabled:
         log.error("nothing to run: --no-market and on-chain both disabled")
