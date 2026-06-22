@@ -21,15 +21,18 @@ from collectors.onchain_collector import (
     ACCUMULATION,
     DISTRIBUTION,
     NEUTRAL,
+    BitcoinEsploraSource,
     ChainConfig,
     CompositeSource,
     DefiLlamaSource,
     EtherscanSource,
     OnChainCollector,
     OnChainSource,
+    SATS_PER_BTC,
     Transfer,
     TransferSource,
     build_source,
+    parse_esplora_txs,
     parse_tokentx,
     summarize_flows,
     tvl_reading,
@@ -325,6 +328,99 @@ def test_defillama_read_uses_tvl(monkeypatch):
     assert src.read("DOGE", NOW - 3600, NOW, price_usd=None, whale_usd=0, deadband=0.05) is None
 
 
+# ── Bitcoin Esplora source: native-BTC CEX flows ─────────────────
+BTC_ADDR = "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"
+OTHER_ADDR = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+SATS = SATS_PER_BTC
+
+
+def _btx(ts, vins, vouts, confirmed=True):
+    """An Esplora tx: vins/vouts are (address, sats) pairs (address None == foreign)."""
+    return {
+        "status": {"confirmed": confirmed, "block_time": ts},
+        "vin": [{"prevout": {"scriptpubkey_address": a, "value": v}} for a, v in vins],
+        "vout": [{"scriptpubkey_address": a, "value": v} for a, v in vouts],
+    }
+
+
+def test_parse_esplora_net_deposit_is_inflow():
+    # Foreign sender → exchange address: a deposit ONTO the exchange.
+    txs = [_btx(NOW, vins=[(OTHER_ADDR, 2 * SATS)], vouts=[(BTC_ADDR, 2 * SATS)])]
+    transfers = parse_esplora_txs(txs, BTC_ADDR, since_ts=NOW - 3600)
+    assert [(t.direction, t.amount) for t in transfers] == [("in", 2.0)]
+
+
+def test_parse_esplora_net_withdrawal_nets_out_change():
+    # Exchange spends 5 BTC, pays 3 out and 2 back to itself as change → net out 3.
+    txs = [_btx(NOW, vins=[(BTC_ADDR, 5 * SATS)],
+                vouts=[(OTHER_ADDR, 3 * SATS), (BTC_ADDR, 2 * SATS)])]
+    transfers = parse_esplora_txs(txs, BTC_ADDR, since_ts=NOW - 3600)
+    assert [(t.direction, t.amount) for t in transfers] == [("out", 3.0)]
+
+
+def test_parse_esplora_skips_unconfirmed_and_pre_window():
+    unconfirmed = _btx(NOW, vins=[(OTHER_ADDR, SATS)], vouts=[(BTC_ADDR, SATS)], confirmed=False)
+    old = _btx(NOW - 99999, vins=[(OTHER_ADDR, SATS)], vouts=[(BTC_ADDR, SATS)])
+    assert parse_esplora_txs([unconfirmed, old], BTC_ADDR, since_ts=NOW - 3600) == []
+
+
+def test_parse_esplora_pure_internal_move_is_no_flow():
+    # Address on both sides (consolidation): net ~0 → no transfer emitted.
+    txs = [_btx(NOW, vins=[(BTC_ADDR, 5 * SATS)], vouts=[(BTC_ADDR, 5 * SATS)])]
+    assert parse_esplora_txs(txs, BTC_ADDR, since_ts=NOW - 3600) == []
+
+
+def test_parse_esplora_skips_malformed_and_coinbase():
+    coinbase = {"status": {"confirmed": True, "block_time": NOW},
+                "vin": [{"is_coinbase": True}],  # no prevout
+                "vout": [{"scriptpubkey_address": BTC_ADDR, "value": SATS}]}
+    transfers = parse_esplora_txs([coinbase], BTC_ADDR, since_ts=NOW - 3600)
+    assert [(t.direction, t.amount) for t in transfers] == [("in", 1.0)]
+
+
+def test_bitcoin_covers_only_configured_assets():
+    src = BitcoinEsploraSource(cex_addresses=[BTC_ADDR])
+    assert src.covers("BTC") is True
+    assert src.covers("ETH") is False
+
+
+def test_bitcoin_uncovered_without_addresses():
+    # No addresses ⇒ covered asset reports uncovered so a composite falls through.
+    src = BitcoinEsploraSource(cex_addresses=[])
+    assert src.covers("BTC") is False
+    assert src.transfers("BTC", NOW - 3600, NOW) is None
+
+
+def test_bitcoin_source_aggregates_addresses_to_usd(monkeypatch):
+    """Two scanned wallets sum into one reading; base TransferSource converts to USD."""
+    src = BitcoinEsploraSource(cex_addresses=[BTC_ADDR, OTHER_ADDR])
+    per_addr = {
+        BTC_ADDR: [_btx(NOW, vins=[("x", 3 * SATS)], vouts=[(BTC_ADDR, 3 * SATS)])],   # +3 in
+        OTHER_ADDR: [_btx(NOW, vins=[(OTHER_ADDR, 1 * SATS)], vouts=[("y", 1 * SATS)])],  # -1 out
+    }
+    monkeypatch.setattr(src, "_get_address_txs", lambda addr, since: per_addr[addr])
+
+    r = src.read("BTC", NOW - 3600, NOW, price_usd=50_000.0, whale_usd=1e12, deadband=0.05)
+    assert r["exchange_inflow"] == pytest.approx(150_000.0)   # 3 BTC * $50k
+    assert r["exchange_outflow"] == pytest.approx(50_000.0)   # 1 BTC * $50k
+    assert r["net_flow"] == pytest.approx(-100_000.0)         # net inflow → distribution
+    assert r["flow_signal"] == DISTRIBUTION
+
+
+def test_bitcoin_from_config_overrides_defaults():
+    src = BitcoinEsploraSource.from_config(
+        {"assets": ["BTC"], "cex_addresses": [BTC_ADDR], "max_pages": 2}
+    )
+    assert src.cex_addresses == (BTC_ADDR,)
+    assert src.max_pages == 2
+
+
+def test_bitcoin_from_config_uses_defaults_when_absent():
+    src = BitcoinEsploraSource.from_config({})
+    assert src.covers("BTC") is True             # default assets + starter addresses
+    assert len(src.cex_addresses) >= 1
+
+
 # ── composing sources + build_source ─────────────────────────────
 def test_composite_routes_to_first_covering_source():
     etherscan = EtherscanSource(api_key="k")              # covers LINK, not SOL
@@ -340,6 +436,22 @@ def test_build_source_assembles_providers():
     assert isinstance(src, CompositeSource)
     assert src.covers("LINK")   # via etherscan
     assert src.covers("SOL")    # via defillama
+
+
+def test_build_source_wires_bitcoin_esplora():
+    src = build_source({"providers": ["bitcoin_esplora"]})
+    assert isinstance(src, BitcoinEsploraSource)
+    assert src.covers("BTC")
+
+
+def test_build_source_routes_btc_to_flow_before_tvl_proxy():
+    """Provider order puts true-flow ahead of DefiLlama's BTC-DeFi TVL proxy."""
+    cfg = {"providers": ["bitcoin_esplora", "defillama"]}
+    src = build_source(cfg)
+    assert isinstance(src, CompositeSource)
+    # both can cover BTC; the first listed (bitcoin_esplora) must win.
+    assert isinstance(src.sources[0], BitcoinEsploraSource)
+    assert src.sources[0].covers("BTC")
 
 
 def test_build_source_single_provider_is_not_wrapped():

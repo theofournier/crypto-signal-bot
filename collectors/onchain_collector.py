@@ -17,16 +17,20 @@ obeys the two non-negotiables (PLAN §2):
 
 **Pluggable, composable sources.** The data provider is injected (mirroring how
 ``market_collector`` injects its CCXT ``exchange``) so the collector is testable
-without a network and providers swap without touching this loop. Two real sources
+without a network and providers swap without touching this loop. Three real sources
 ship, and they are **complementary** (combined via :class:`CompositeSource`, first
 to cover an asset wins):
 
   * :class:`EtherscanSource` — real CEX inflow/outflow + whale transfers for
     **ERC-20 tokens** on any EVM chain, via Etherscan's free multichain v2 API
     (one ``ETHERSCAN_API_KEY`` in ``secrets.env`` covers every chain by ``chainid``).
+  * :class:`BitcoinEsploraSource` — real CEX inflow/outflow + whale transfers for
+    **native BTC**, via the free, keyless Esplora API (blockstream.info). Same
+    true-flow quality class as Etherscan, for the headline asset neither other
+    source reads well.
   * :class:`DefiLlamaSource` — **chain TVL momentum** (rising = accumulation,
     falling = distribution) for native L1/L2 coins (SOL, AVAX, ETH, …), free and
-    keyless. This covers exactly the native coins Etherscan cannot.
+    keyless. This covers exactly the native coins the flow sources cannot.
 
 **Config-driven, honest coverage.** Real per-asset CEX flow without a paid
 analytics provider (Glassnode/CryptoQuant/Nansen) is genuinely hard, so coverage
@@ -589,6 +593,194 @@ def tvl_reading(
     }
 
 
+# ── true-flow source: Bitcoin via Esplora (free, no key, native BTC) ─────
+
+ESPLORA_BASE_URL = "https://blockstream.info/api"  # mempool.space mirrors the same API
+SATS_PER_BTC = 100_000_000
+
+# Built-in starter registry of known Bitcoin CEX wallets, used when config gives no
+# ``onchain.bitcoin_esplora.cex_addresses``. Verified live on-chain; EDIT in
+# config.yaml. Cold wallets give a slow signal (rare, large moves); a busy *hot*
+# wallet (high tx_count) is where most deposit/withdrawal flow shows up — add your
+# exchange's hot wallets for a livelier reading. Unlike EVM hex addresses, Bitcoin
+# addresses are CASE-SENSITIVE (base58 & bech32) — store them verbatim, never lowercased.
+DEFAULT_BITCOIN_CEX_ADDRESSES: tuple[str, ...] = (
+    "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo",                                # Binance cold
+    "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97",    # Bitfinex cold
+    "bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h",                        # busy hot wallet (flow-rich)
+)
+DEFAULT_BITCOIN_ASSETS: tuple[str, ...] = ("BTC",)
+
+
+class BitcoinEsploraSource(TransferSource):
+    """Real **native-BTC** CEX flows from the free, keyless Esplora API.
+
+    Bitcoin is the headline asset but the ERC-20-only :class:`EtherscanSource`
+    cannot touch it and :class:`DefiLlamaSource` only sees its tiny BTC-DeFi TVL.
+    This source closes that gap with a *true-flow* reading of the same quality class
+    as Etherscan: for each known exchange address it pulls recent transactions and
+    classifies each as a net deposit (onto the exchange → distribution pressure) or
+    net withdrawal (leaving → accumulation), in BTC units. The base
+    :class:`TransferSource` then converts to USD via the stored BTC price and reduces
+    to the directional reading — so it fills **every** ``onchain_data`` flow column,
+    not just ``net_flow``.
+
+    Coverage is config-driven (``onchain.bitcoin_esplora`` in config.yaml, or the
+    built-in starter registry otherwise): the watched ``assets`` (default ``BTC``)
+    and the ``cex_addresses`` to scan. With no addresses the source reports the asset
+    as uncovered (``covers`` → False) so a :class:`CompositeSource` cleanly falls
+    through to the next provider. ``urllib`` is the only non-pure part; the UTXO
+    classification lives in the pure :func:`parse_esplora_txs`.
+    """
+
+    def __init__(
+        self,
+        cex_addresses: Sequence[str] | None = None,
+        assets: Sequence[str] | None = None,
+        base_url: str = ESPLORA_BASE_URL,
+        timeout: float = 15.0,
+        max_pages: int = 4,
+    ) -> None:
+        self.cex_addresses = tuple(
+            cex_addresses if cex_addresses is not None else DEFAULT_BITCOIN_CEX_ADDRESSES
+        )
+        self.assets = frozenset(
+            str(a).upper() for a in (assets if assets is not None else DEFAULT_BITCOIN_ASSETS)
+        )
+        self.base_url = base_url
+        self.timeout = timeout
+        # Esplora returns ~25 confirmed txs/page (newest first); page back until the
+        # window is covered. Bounded so a busy hot wallet can't run the cycle forever.
+        self.max_pages = max_pages
+        self.log = logging.getLogger("collector.onchain.bitcoin")
+
+    @classmethod
+    def from_config(
+        cls, btc_cfg: Mapping[str, Any] | None, **kwargs: Any
+    ) -> "BitcoinEsploraSource":
+        """Build from the ``onchain.bitcoin_esplora`` block (uses defaults if absent)."""
+        cfg = btc_cfg or {}
+        if "max_pages" in cfg:
+            kwargs["max_pages"] = int(cfg["max_pages"])
+        return cls(
+            cex_addresses=cfg.get("cex_addresses"),  # None -> DEFAULT_BITCOIN_CEX_ADDRESSES
+            assets=cfg.get("assets"),
+            **kwargs,
+        )
+
+    def covers(self, base_asset: str) -> bool:
+        # No addresses ⇒ report uncovered so CompositeSource falls through (e.g. to
+        # DefiLlama's BTC TVL) rather than serving an empty reading.
+        return base_asset.upper() in self.assets and bool(self.cex_addresses)
+
+    def transfers(
+        self, base_asset: str, since_ts: int, now_ts: int
+    ) -> list[Transfer] | None:
+        if base_asset.upper() not in self.assets:
+            return None  # not an asset we cover → uncovered
+        if not self.cex_addresses:
+            self.log.warning("no bitcoin CEX addresses configured; source unavailable")
+            return None
+
+        out: list[Transfer] = []
+        for addr in self.cex_addresses:
+            try:
+                txs = self._get_address_txs(addr, since_ts)
+            except Exception:  # noqa: BLE001 — one address must not sink the rest
+                self.log.exception("esplora txs failed (addr=%s); skipping", addr)
+                continue
+            out.extend(parse_esplora_txs(txs, addr, since_ts))
+        return out
+
+    def _get_address_txs(self, address: str, since_ts: int) -> list[Mapping[str, Any]]:
+        """Recent confirmed txs for ``address``, paged back until the window is covered.
+
+        Esplora returns newest-first, ~25 confirmed per page; we follow the
+        ``/txs/chain/{last_txid}`` cursor and stop as soon as a page's oldest tx
+        predates ``since_ts`` (or ``max_pages`` is hit, so a hot wallet stays bounded).
+        """
+        collected: list[Mapping[str, Any]] = []
+        last_txid: str | None = None
+        for _ in range(self.max_pages):
+            page = self._fetch_txs_page(address, last_txid)
+            if not page:
+                break
+            collected.extend(page)
+            oldest = page[-1]
+            oldest_ts = (oldest.get("status") or {}).get("block_time")
+            if oldest_ts is not None and int(oldest_ts) < since_ts:
+                break  # we've paged past the window — older txs are irrelevant
+            last_txid = oldest.get("txid")
+            if not last_txid:
+                break
+        return collected
+
+    def _fetch_txs_page(
+        self, address: str, last_txid: str | None
+    ) -> list[Mapping[str, Any]]:
+        """One Esplora address-txs page (the confirmed cursor when ``last_txid`` given)."""
+        path = f"/address/{urllib.parse.quote(address)}/txs"
+        if last_txid:
+            path += f"/chain/{urllib.parse.quote(last_txid)}"
+        url = f"{self.base_url}{path}"
+        with urllib.request.urlopen(url, timeout=self.timeout) as resp:  # noqa: S310 - fixed https host
+            return json.loads(resp.read().decode())
+
+
+def parse_esplora_txs(
+    txs: Sequence[Mapping[str, Any]], address: str, since_ts: int
+) -> list[Transfer]:
+    """Parse Esplora address txs into net in/out CEX transfers for ``address`` (pure).
+
+    Bitcoin is UTXO-based, so a single tx can both spend the exchange's coins (inputs)
+    and pay change back to it (outputs). We therefore reduce **per transaction** to the
+    address's *net* movement — outputs received minus inputs spent — and emit one
+    :class:`Transfer`: net positive = a deposit ONTO the exchange (``"in"``), net
+    negative = a withdrawal LEAVING it (``"out"``). This nets out change correctly and,
+    across the aggregated address set, cancels internal exchange-to-exchange shuffles.
+
+    Only **confirmed** txs at or after ``since_ts`` count (FR-DC-6: an unconfirmed,
+    still-forming tx is not completed data). Malformed rows are skipped — free data is
+    messy (PLAN §7, validate on intake). Amounts are satoshis converted to BTC units;
+    USD conversion happens later in :func:`summarize_flows`.
+    """
+    transfers: list[Transfer] = []
+    for tx in txs:
+        status = tx.get("status") or {}
+        if not status.get("confirmed"):
+            continue  # still-forming / mempool tx → not completed data
+        try:
+            ts = int(status["block_time"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if ts < since_ts:
+            continue
+
+        received_sats = 0  # value arriving AT the address (outputs to it)
+        sent_sats = 0      # value leaving FROM the address (inputs it spent)
+        for vout in tx.get("vout", []):
+            try:
+                if vout.get("scriptpubkey_address") == address:
+                    received_sats += int(vout["value"])
+            except (KeyError, ValueError, TypeError):
+                continue  # skip malformed output rather than load garbage
+        for vin in tx.get("vin", []):
+            prevout = vin.get("prevout") or {}
+            try:
+                if prevout.get("scriptpubkey_address") == address:
+                    sent_sats += int(prevout["value"])
+            except (KeyError, ValueError, TypeError):
+                continue  # skip malformed input (incl. coinbase, which has no prevout)
+
+        net_sats = received_sats - sent_sats
+        if net_sats > 0:
+            transfers.append(Transfer(ts=ts, amount=net_sats / SATS_PER_BTC, direction="in"))
+        elif net_sats < 0:
+            transfers.append(Transfer(ts=ts, amount=-net_sats / SATS_PER_BTC, direction="out"))
+        # net_sats == 0 (pure internal move / fee-only) contributes no flow
+    return transfers
+
+
 # ── composing sources ───────────────────────────────────────────────
 
 class CompositeSource(OnChainSource):
@@ -628,6 +820,7 @@ class CompositeSource(OnChainSource):
 _PROVIDER_BUILDERS = {
     "etherscan": lambda cfg, api_key: EtherscanSource.from_config(cfg.get("etherscan", {}), api_key=api_key),
     "defillama": lambda cfg, api_key: DefiLlamaSource.from_config(cfg.get("defillama", {})),
+    "bitcoin_esplora": lambda cfg, api_key: BitcoinEsploraSource.from_config(cfg.get("bitcoin_esplora", {})),
 }
 
 

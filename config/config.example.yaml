@@ -74,9 +74,12 @@ onchain:
 
   # Sources tried in order; the FIRST that covers an asset serves it. They are
   # complementary: Etherscan reads CEX flows for ERC-20 tokens (needs
-  # ETHERSCAN_API_KEY in secrets.env); DefiLlama reads chain TVL momentum for
-  # native L1/L2 coins (free, no key). An asset no source covers writes nothing.
-  providers: ["etherscan", "defillama"]
+  # ETHERSCAN_API_KEY in secrets.env); bitcoin_esplora reads native-BTC CEX flows
+  # (free, no key); DefiLlama reads chain TVL momentum for native L1/L2 coins (free,
+  # no key). Order matters — bitcoin_esplora before defillama so BTC gets its real
+  # flow reading instead of DefiLlama's tiny BTC-DeFi TVL proxy. An asset no source
+  # covers writes nothing.
+  providers: ["etherscan", "bitcoin_esplora", "defillama"]
 
   etherscan:
     # Coverage registry — EDIT HERE, no code change. One block per EVM chain
@@ -96,6 +99,20 @@ onchain:
           LINK: "0x514910771af9ca656af840dff83e8264ecf986ca"
           UNI:  "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984"
           AAVE: "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+
+  bitcoin_esplora:
+    # Native-BTC CEX flows via the free, keyless Esplora API (blockstream.info).
+    # Scans each known exchange wallet's recent txs and nets deposits (onto the
+    # exchange) vs withdrawals (leaving) into a true-flow reading — same quality as
+    # Etherscan, for BTC. Bitcoin addresses are CASE-SENSITIVE — paste them verbatim.
+    # A busy *hot* wallet (high tx count) carries most of the flow; cold wallets move
+    # rarely. Verify/extend this list with your exchange's wallets.
+    assets: ["BTC"]            # base assets this source covers
+    max_pages: 4               # Esplora pages ~25 txs each; cap per address per cycle
+    cex_addresses:
+      - "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"                              # Binance cold
+      - "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97"  # Bitfinex cold
+      - "bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h"                      # busy hot wallet (flow-rich)
 
   defillama:
     # Maps a base asset to its DefiLlama chain slug; rising chain TVL reads as
