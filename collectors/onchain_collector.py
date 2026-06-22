@@ -101,6 +101,18 @@ class OnChainSource(ABC):
     degrading gracefully (FR-DC-4).
     """
 
+    #: Human-readable provider id, surfaced in logs so an operator can see which
+    #: source actually served a reading. Subclasses override.
+    name: str = "onchain"
+
+    def serving_source(self, base_asset: str) -> "OnChainSource | None":
+        """The concrete source that would serve ``base_asset`` (for logging).
+
+        Default: this source if it covers the asset. :class:`CompositeSource`
+        overrides to return whichever underlying source wins.
+        """
+        return self if self.covers(base_asset) else None
+
     @abstractmethod
     def covers(self, base_asset: str) -> bool:
         """True if this source can produce a reading for ``base_asset``."""
@@ -204,7 +216,7 @@ class OnChainCollector(BaseCollector):
             self.log.debug("%s not covered by any on-chain source; skipping", self.base_asset)
             return None
         now = int(self._now())
-        return self.source.read(
+        reading = self.source.read(
             self.base_asset,
             now - self.window_seconds,
             now,
@@ -212,6 +224,14 @@ class OnChainCollector(BaseCollector):
             whale_usd=self.whale_usd,
             deadband=self.flow_deadband,
         )
+        if reading is not None:
+            serving = self.source.serving_source(self.base_asset)
+            src = serving.name if serving is not None else "unknown"
+            self.log.info(
+                "%s on-chain reading from source=%s (flow_signal=%s)",
+                self.base_asset, src, reading.get("flow_signal"),
+            )
+        return reading
 
     # ── normalize (stamp the reading into a row) ───────────────────
     def normalize(self, reading: dict | None) -> list[Mapping[str, Any]]:
@@ -352,6 +372,8 @@ class EtherscanSource(TransferSource):
     base :class:`TransferSource` reduces the transfers to USD flows; ``urllib`` is
     the only non-pure part — parsing stays in the pure :func:`parse_tokentx`.
     """
+
+    name = "etherscan"
 
     def __init__(
         self,
@@ -499,6 +521,8 @@ class DefiLlamaSource(OnChainSource):
     is the only non-pure part; the reduction lives in the pure :func:`tvl_reading`.
     """
 
+    name = "defillama"
+
     def __init__(
         self,
         chains: Mapping[str, str] | None = None,
@@ -632,6 +656,8 @@ class BitcoinEsploraSource(TransferSource):
     through to the next provider. ``urllib`` is the only non-pure part; the UTXO
     classification lives in the pure :func:`parse_esplora_txs`.
     """
+
+    name = "bitcoin_esplora"
 
     def __init__(
         self,
@@ -791,11 +817,21 @@ class CompositeSource(OnChainSource):
     source actually has data for it.
     """
 
+    name = "composite"
+
     def __init__(self, sources: Sequence[OnChainSource]) -> None:
         self.sources = list(sources)
 
     def covers(self, base_asset: str) -> bool:
         return any(s.covers(base_asset) for s in self.sources)
+
+    def serving_source(self, base_asset: str) -> "OnChainSource | None":
+        """The first underlying source that covers ``base_asset`` (the one ``read``
+        delegates to), so logs name the real provider rather than "composite"."""
+        for source in self.sources:
+            if source.covers(base_asset):
+                return source.serving_source(base_asset)
+        return None
 
     def read(
         self,
