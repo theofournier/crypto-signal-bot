@@ -127,6 +127,63 @@ onchain:
       INJ:  "Injective"
       BTC:  "Bitcoin"
 
+sentiment:
+  # Sentiment collector (Phase 9): social/news mood -> sentiment_data. Writes a
+  # rolling aggregate per asset, never individual posts. Each text item is scored
+  # by the classifier; readings from all sources are blended (credibility-weighted).
+  enabled: true              # set false (or run with --no-sentiment) to skip it
+  poll_seconds: 600          # slow — social/news APIs rate-limit, mood drifts slowly
+  window_hours: 6            # aggregate chatter over this trailing window
+
+  # Sources are BLENDED (unlike on-chain's first-covers-wins). fear_greed + rss are
+  # keyless and run out of the box; reddit/telegram need keys in secrets.env and
+  # degrade to a no-op without them. Order does not matter — all covering sources
+  # contribute, weighted by their credibility below.
+  providers: ["fear_greed", "rss"]   # add "reddit"/"telegram" once keys are set
+
+  classifier:
+    # Rule-based default (transparent, no deps, no training). Extend the lexicons
+    # here, or implement SentimentClassifier for a learned model (e.g. CryptoBERT).
+    extra_bullish: []        # additional bullish keywords
+    extra_bearish: []        # additional bearish keywords
+
+  # Per-asset keyword aliases used to keep only relevant items from general feeds.
+  # Unknown assets fall back to the lowercased base symbol. Edit/extend freely.
+  aliases:
+    BTC:  ["btc", "bitcoin"]
+    ETH:  ["eth", "ethereum", "ether"]
+    SOL:  ["sol", "solana"]
+    AVAX: ["avax", "avalanche"]
+    SUI:  ["sui"]
+    NEAR: ["near"]
+    LINK: ["link", "chainlink"]
+    INJ:  ["inj", "injective"]
+    DOGE: ["doge", "dogecoin"]
+    TIA:  ["tia", "celestia"]
+
+  fear_greed:
+    # Market-wide Fear & Greed Index (alternative.me): free, no key, always on.
+    credibility: 0.8         # source-trust weight in the blend (0–1)
+
+  rss:
+    credibility: 0.5
+    feeds:                   # crypto news feeds; items are filtered to the asset
+      - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+      - "https://cointelegraph.com/rss"
+      - "https://decrypt.co/feed"
+
+  reddit:
+    # Needs REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USER_AGENT in secrets.env.
+    credibility: 0.5
+    limit: 50                # max posts pulled per cycle
+    subreddits: ["CryptoCurrency", "CryptoMarkets"]
+
+  telegram:
+    # Needs TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_SESSION in secrets.env.
+    credibility: 0.4
+    limit: 100               # max messages pulled per channel per cycle
+    channels: []             # public channel @usernames to read
+
 data:
   history_days: 180          # how much to seed for backtesting
 

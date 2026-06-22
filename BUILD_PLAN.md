@@ -178,7 +178,7 @@ are consistent, and you trust the loop. **This is the gate before adding complex
 
 - [x] Add more pairs to `config.yaml` universe; confirm performance/latency is OK.
 - [x] Write `collectors/onchain_collector.py` (DefiLlama/Etherscan → `onchain_data`).
-- [ ] Write `collectors/sentiment_collector.py` (Reddit/TG/RSS + classifier → `sentiment_data`).
+- [x] Write `collectors/sentiment_collector.py` (Reddit/TG/RSS + classifier → `sentiment_data`).
       Seed historical sentiment from Fear & Greed + a Kaggle dataset for the classifier.
 - [ ] Make `core/normalize.py` produce real on-chain & sentiment sub-scores.
 - [ ] Now the gate's "all three agree" requirement is fully active — re-validate in dry-run.
