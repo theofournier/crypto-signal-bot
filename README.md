@@ -55,6 +55,54 @@ cp config/secrets.example.env config/secrets.env
 
 ---
 
+## Optional: local LLM for sentiment
+
+The sentiment collector classifies each social/news item into a directional score. By default
+it uses a transparent, dependency-free **rule-based** classifier (no setup needed). For sharper
+results you can swap in a **local LLM** served by [Ollama](https://ollama.com) — free,
+self-hosted, no API key, nothing leaves your machine. If the Ollama server is down the collector
+automatically falls back to the rule-based classifier, so this is purely additive.
+
+```bash
+# 1. Install Ollama (Linux/WSL2; macOS & Windows: download the app from ollama.com)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 2. Start the server (often auto-starts as a service; otherwise run it)
+ollama serve                         # listens on http://localhost:11434
+
+# 3. Pull a small, fast instruct model (~2 GB; runs on CPU, GPU just speeds it up)
+ollama pull llama3.2:3b              # alternatives: qwen2.5:3b, phi3:mini
+
+# 4. Verify it answers (this is the same endpoint the collector calls)
+curl http://localhost:11434/api/generate -d '{
+  "model": "llama3.2:3b",
+  "prompt": "You are a financial sentiment classifier for cryptocurrency markets. Rate the sentiment of the text below toward the asset near-term price. Respond with ONLY a single number from -1.0 to 1.0 and nothing else: -1.0 = very bearish, 0.0 = neutral, 1.0 = very bullish. Text: Bitcoin breaks all-time high. Score:",
+  "stream": false, "options": {"temperature": 0}
+}'
+```
+
+Then enable it in your private `config/config.yaml`:
+
+```yaml
+sentiment:
+  classifier:
+    type: "ollama"                   # "lexicon" (default) | "ollama"
+    ollama:
+      model: "llama3.2:3b"
+      base_url: "http://localhost:11434"
+```
+
+Smoke-test the sentiment collector end-to-end:
+
+```bash
+python3 scripts/run_collectors.py --no-market --no-onchain --pair BTC/USDT --once -v
+```
+
+Keep `ollama serve` running alongside the bot (a `systemd`/`tmux` unit, like the bot itself).
+Verdicts are cached per item, so recurring headlines don't re-prompt the model.
+
+---
+
 ## Docker deployment (VPS)
 
 Runs two long-lived services — `collectors` (writes market data) and `engine` (scores,

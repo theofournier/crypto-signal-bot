@@ -11,15 +11,20 @@ Run with: pytest tests/test_sentiment_collector.py
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
 
 from collectors.base_collector import BaseCollector
+from collectors import sentiment_collector
 from collectors.sentiment_collector import (
     BlendSource,
+    FallbackClassifier,
     FearGreedSource,
     LexiconClassifier,
+    OllamaClassifier,
+    OllamaUnavailable,
     RedditSource,
     RssSource,
     SentimentClassifier,
@@ -32,11 +37,14 @@ from collectors.sentiment_collector import (
     _rss_entries_to_items,
     aggregate_items,
     blend_readings,
+    build_classifier,
+    build_ollama_prompt,
     build_source,
     fng_reading,
     fng_score,
     mentions,
     parse_fng_history,
+    parse_ollama_score,
 )
 from data import db
 
@@ -387,3 +395,121 @@ def test_build_source_wires_credentialed_sources():
     assert isinstance(src, BlendSource)
     assert any(isinstance(s, RedditSource) for s in src.sources)
     assert any(isinstance(s, TelegramSource) for s in src.sources)
+
+
+# ── Ollama local-LLM classifier ──────────────────────────────────────
+def test_parse_ollama_score_numbers_labels_and_clamp():
+    assert parse_ollama_score("0.8") == pytest.approx(0.8)
+    assert parse_ollama_score("Score: -0.5") == pytest.approx(-0.5)
+    assert parse_ollama_score("2.0") == pytest.approx(1.0)   # clamped
+    assert parse_ollama_score("bullish") == pytest.approx(1.0)
+    assert parse_ollama_score("looks bearish to me") == pytest.approx(-1.0)
+    assert parse_ollama_score("neutral") == pytest.approx(0.0)
+    assert parse_ollama_score("no idea") is None
+
+
+def test_build_ollama_prompt_includes_text():
+    prompt = build_ollama_prompt("  BTC to the moon  ")
+    assert "BTC to the moon" in prompt
+    assert "-1.0" in prompt and "1.0" in prompt  # constrained output instructions
+
+
+class _FakeResp:
+    """Minimal context-manager stand-in for urllib's HTTP response."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_ollama_classifier_parses_response(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):  # noqa: ARG001
+        calls["n"] += 1
+        return _FakeResp({"response": "0.7"})
+
+    monkeypatch.setattr(sentiment_collector.urllib.request, "urlopen", fake_urlopen)
+    c = OllamaClassifier(model="test")
+    assert c.score("BTC pumping") == pytest.approx(0.7)
+    # cache: same normalized text scores once more without a second HTTP call
+    assert c.score("BTC   pumping") == pytest.approx(0.7)
+    assert calls["n"] == 1
+
+
+def test_ollama_caches_genuine_none(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout):  # noqa: ARG001
+        calls["n"] += 1
+        return _FakeResp({"response": "???"})  # unparseable -> None
+
+    monkeypatch.setattr(sentiment_collector.urllib.request, "urlopen", fake_urlopen)
+    c = OllamaClassifier()
+    assert c.score("mystery") is None
+    assert c.score("mystery") is None
+    assert calls["n"] == 1  # cached None, not re-queried
+
+
+def test_ollama_raises_unavailable_on_transport_error(monkeypatch):
+    def boom(request, timeout):  # noqa: ARG001
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(sentiment_collector.urllib.request, "urlopen", boom)
+    with pytest.raises(OllamaUnavailable):
+        OllamaClassifier().score("anything")
+
+
+# ── FallbackClassifier ───────────────────────────────────────────────
+class _Raises(SentimentClassifier):
+    def score(self, text):
+        raise OllamaUnavailable("down")
+
+
+class _Const(SentimentClassifier):
+    def __init__(self, value):
+        self.value = value
+
+    def score(self, text):
+        return self.value
+
+
+def test_fallback_uses_lexicon_when_primary_raises():
+    fb = FallbackClassifier(_Raises(), LexiconClassifier())
+    assert fb.score("BTC about to moon and rally") > 0  # served by the lexicon
+
+
+def test_fallback_respects_primary_none():
+    # A genuine "undecidable" from the primary is honored — fallback NOT consulted.
+    fb = FallbackClassifier(_Const(None), _Const(1.0))
+    assert fb.score("whatever") is None
+
+
+def test_fallback_prefers_primary_when_healthy():
+    fb = FallbackClassifier(_Const(0.42), LexiconClassifier())
+    assert fb.score("anything") == pytest.approx(0.42)
+
+
+# ── build_classifier wiring ──────────────────────────────────────────
+def test_build_classifier_default_is_lexicon():
+    assert isinstance(build_classifier({}), LexiconClassifier)
+
+
+def test_build_classifier_ollama_is_wrapped_in_fallback():
+    c = build_classifier({"classifier": {"type": "ollama", "ollama": {"model": "m"}}})
+    assert isinstance(c, FallbackClassifier)
+    assert isinstance(c.primary, OllamaClassifier)
+    assert isinstance(c.fallback, LexiconClassifier)
+    assert c.primary.model == "m"
+
+
+def test_build_classifier_unknown_type_falls_back_to_lexicon():
+    assert isinstance(build_classifier({"classifier": {"type": "magic"}}), LexiconClassifier)

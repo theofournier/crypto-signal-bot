@@ -142,10 +142,17 @@ sentiment:
   providers: ["fear_greed", "rss"]   # add "reddit"/"telegram" once keys are set
 
   classifier:
-    # Rule-based default (transparent, no deps, no training). Extend the lexicons
-    # here, or implement SentimentClassifier for a learned model (e.g. CryptoBERT).
-    extra_bullish: []        # additional bullish keywords
-    extra_bearish: []        # additional bearish keywords
+    # "lexicon" (default, transparent, no deps, no training) or "ollama" (a local
+    # LLM via Ollama). With "ollama" the rule-based lexicon stays the fallback, so
+    # a stopped Ollama server degrades gracefully instead of halting collection.
+    type: "lexicon"
+    extra_bullish: []        # additional bullish keywords (lexicon)
+    extra_bearish: []        # additional bearish keywords (lexicon)
+    ollama:                  # used only when type: "ollama"
+      model: "llama3.2:3b"   # any model you've pulled: `ollama pull llama3.2:3b`
+      base_url: "http://localhost:11434"   # local Ollama server
+      timeout: 30            # seconds per classification request
+      cache_size: 2048       # remember recent verdicts so recurring posts cost 1 call
 
   # Per-asset keyword aliases used to keep only relevant items from general feeds.
   # Unknown assets fall back to the lowercased base symbol. Edit/extend freely.

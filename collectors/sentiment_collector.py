@@ -36,10 +36,13 @@ source's credibility:
     ``TELEGRAM_*`` creds + a saved session string).
 
 **The LLM/classifier lives here, not in scoring** (PLAN §5.3). The default
-:class:`LexiconClassifier` is a transparent, dependency-free rule-based scorer; a
-heavier model (CryptoBERT via Ollama, or one trained on a Kaggle dataset — see
-``scripts/seed_sentiment.py``) can be dropped in by implementing
-:class:`SentimentClassifier`. Scoring downstream only ever sees the numbers.
+:class:`LexiconClassifier` is a transparent, dependency-free rule-based scorer;
+:class:`OllamaClassifier` swaps in a **local LLM** via Ollama (free, self-hosted),
+always wrapped in a :class:`FallbackClassifier` so a stopped server degrades to the
+lexicon rather than halting the collector. Any other model (CryptoBERT, or one
+trained on a Kaggle dataset — see ``scripts/seed_sentiment.py``) drops in by
+implementing :class:`SentimentClassifier`. Scoring downstream only ever sees the
+numbers.
 
 **Config-driven, honest coverage.** Sources, feeds, subreddits, channels, the
 classifier lexicon, and per-source credibility all read from the ``sentiment``
@@ -59,6 +62,7 @@ import time
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -160,6 +164,175 @@ class LexiconClassifier(SentimentClassifier):
         if total == 0:
             return None  # no signal-bearing words → undecidable, drop it
         return (bull - bear) / total
+
+
+# ── local-LLM classifier via Ollama (PLAN §5.1, §11) ────────────────
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "llama3.2:3b"   # any model you've `ollama pull`ed
+DEFAULT_OLLAMA_TIMEOUT = 30.0
+DEFAULT_OLLAMA_CACHE = 2048
+
+# Deterministic, output-constrained prompt: ask for one number in [-1, 1] so the
+# response parses cleanly. ``temperature: 0`` (set on the request) makes a given
+# text score reproducibly — essential for an auditable, non-repainting pipeline.
+OLLAMA_PROMPT_TEMPLATE = (
+    "You are a financial sentiment classifier for cryptocurrency markets.\n"
+    "Rate the sentiment of the text below toward the asset's near-term price.\n"
+    "Respond with ONLY a single number from -1.0 to 1.0 and nothing else:\n"
+    "  -1.0 = very bearish, 0.0 = neutral, 1.0 = very bullish.\n\n"
+    "Text: {text}\n"
+    "Score:"
+)
+
+_SCORE_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def build_ollama_prompt(text: str) -> str:
+    """Build the deterministic classification prompt for one item (pure)."""
+    return OLLAMA_PROMPT_TEMPLATE.format(text=text.strip())
+
+
+def parse_ollama_score(response: str) -> float | None:
+    """Parse a model response into a clamped ``[-1, +1]`` score (pure).
+
+    Accepts a bare number (preferred) and falls back to bullish/bearish/neutral
+    words, so a chatty model still yields a usable verdict. ``None`` when nothing
+    parseable is found — treated as "undecidable", exactly like a neutral lexicon
+    item (validate on intake — PLAN §7).
+    """
+    text = (response or "").strip().lower()
+    match = _SCORE_RE.search(text)
+    if match:
+        try:
+            return _clamp(float(match.group()), -1.0, 1.0)
+        except ValueError:
+            pass
+    if "bullish" in text:
+        return 1.0
+    if "bearish" in text:
+        return -1.0
+    if "neutral" in text:
+        return 0.0
+    return None
+
+
+class OllamaUnavailable(RuntimeError):
+    """The local Ollama server could not be reached or returned an error.
+
+    Raised (not returned as ``None``) so callers can tell a transport failure apart
+    from a genuine "model couldn't decide" — :class:`FallbackClassifier` catches
+    this to drop back to the rule-based baseline (FR-DC-4).
+    """
+
+
+class OllamaClassifier(SentimentClassifier):
+    """Score items with a **local LLM** served by Ollama (free, self-hosted).
+
+    Each item is sent to Ollama's ``/api/generate`` with a constrained,
+    ``temperature: 0`` prompt and parsed to a number — the LLM lives here in the
+    collector, upstream of scoring (PLAN §5.3), never in the scoring step itself.
+    Verdicts are cached by normalized text (recurring posts cost one call, not
+    many). A transport/HTTP failure raises :class:`OllamaUnavailable` so a wrapper
+    can fall back; wrap with :class:`FallbackClassifier` to keep the rules baseline
+    always available. ``urllib`` is the only non-pure part; prompt building and
+    response parsing stay in the pure helpers above.
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_OLLAMA_MODEL,
+        base_url: str = DEFAULT_OLLAMA_URL,
+        timeout: float = DEFAULT_OLLAMA_TIMEOUT,
+        cache_size: int = DEFAULT_OLLAMA_CACHE,
+    ) -> None:
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.cache_size = cache_size
+        self._cache: "OrderedDict[str, float | None]" = OrderedDict()
+        self.log = logging.getLogger("collector.sentiment.ollama")
+
+    @classmethod
+    def from_config(cls, cfg: Mapping[str, Any] | None) -> "OllamaClassifier":
+        """Build from ``sentiment.classifier.ollama`` (uses defaults if absent)."""
+        cfg = cfg or {}
+        return cls(
+            model=str(cfg.get("model", DEFAULT_OLLAMA_MODEL)),
+            base_url=str(cfg.get("base_url", DEFAULT_OLLAMA_URL)),
+            timeout=float(cfg.get("timeout", DEFAULT_OLLAMA_TIMEOUT)),
+            cache_size=int(cfg.get("cache_size", DEFAULT_OLLAMA_CACHE)),
+        )
+
+    def score(self, text: str) -> float | None:
+        key = _normalize_text(text)
+        cached = self._cache.get(key, _MISS)
+        if cached is not _MISS:
+            self._cache.move_to_end(key)
+            return cached  # type: ignore[return-value]
+        value = parse_ollama_score(self._generate(build_ollama_prompt(text)))
+        self._remember(key, value)
+        return value
+
+    def _remember(self, key: str, value: float | None) -> None:
+        """Cache a verdict, evicting the least-recently-used over capacity."""
+        self._cache[key] = value
+        self._cache.move_to_end(key)
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+
+    def _generate(self, prompt: str) -> str:
+        """One Ollama ``/api/generate`` call; raises :class:`OllamaUnavailable`."""
+        body = json.dumps({
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0},
+        }).encode()
+        request = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:  # noqa: S310 - configured host
+                payload = json.loads(resp.read().decode())
+        except Exception as exc:  # noqa: BLE001 — surface any transport/parse error uniformly
+            raise OllamaUnavailable(f"ollama request failed: {exc}") from exc
+        return str(payload.get("response", ""))
+
+
+class FallbackClassifier(SentimentClassifier):
+    """Try a primary classifier; fall back to an always-available one on failure.
+
+    Mirrors the project's rules-as-baseline philosophy (a learned model never
+    becomes a single point of failure): when the primary (e.g.
+    :class:`OllamaClassifier`) raises, the rule-based :class:`LexiconClassifier`
+    keeps the collector producing data (FR-DC-4). A primary that *returns* ``None``
+    (a genuine "undecidable") is respected — only an exception triggers fallback.
+    """
+
+    def __init__(self, primary: SentimentClassifier, fallback: SentimentClassifier) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.log = logging.getLogger("collector.sentiment.classifier")
+        self._warned = False
+
+    def score(self, text: str) -> float | None:
+        try:
+            value = self.primary.score(text)
+            self._warned = False  # primary healthy again
+            return value
+        except Exception as exc:  # noqa: BLE001 — any primary failure → degrade, never crash
+            if not self._warned:  # warn once per outage, not once per item
+                self.log.warning("primary classifier unavailable (%s); using lexicon fallback", exc)
+                self._warned = True
+            return self.fallback.score(text)
+
+
+# Sentinel for "cache miss" so a cached ``None`` (genuine undecidable) is not
+# mistaken for "not cached" and re-queried every cycle.
+_MISS = object()
 
 
 # ── reduction (pure): a batch of items -> one sentiment_data reading ─
@@ -854,9 +1027,26 @@ _PROVIDER_BUILDERS = {
 
 
 def build_classifier(sentiment_cfg: Mapping[str, Any] | None) -> SentimentClassifier:
-    """Build the classifier from ``sentiment.classifier`` (rule-based default)."""
+    """Build the classifier from ``sentiment.classifier`` (rule-based default).
+
+    ``sentiment.classifier.type`` selects the engine: ``"lexicon"`` (default,
+    no deps) or ``"ollama"`` (a local LLM via Ollama). The Ollama classifier is
+    always wrapped in a :class:`FallbackClassifier` over the lexicon, so a stopped
+    Ollama server degrades to the rule-based baseline rather than halting the
+    collector (FR-DC-4).
+    """
     cfg = sentiment_cfg or {}
-    return LexiconClassifier.from_config(cfg.get("classifier"))
+    cls_cfg = cfg.get("classifier") or {}
+    lexicon = LexiconClassifier.from_config(cls_cfg)
+    kind = str(cls_cfg.get("type", "lexicon")).lower()
+    if kind == "ollama":
+        primary = OllamaClassifier.from_config(cls_cfg.get("ollama"))
+        return FallbackClassifier(primary, lexicon)
+    if kind not in ("lexicon", ""):
+        logging.getLogger("collector.sentiment").warning(
+            "unknown classifier type %r; using lexicon", kind
+        )
+    return lexicon
 
 
 def build_source(
