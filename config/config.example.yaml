@@ -25,7 +25,12 @@ risk:
   volatility_filter: true
   volatility_spike_mult: 2.5 # sit out when bb_width > 2.5x its recent median (chaotic spike)
   min_edge_over_fees: 1.5    # skip signals whose expected move < 1.5x the round-trip fee
-  bankroll: 10000            # capital used for position sizing (quote currency, e.g. USDT)
+  bankroll: 10000            # STARTING equity (quote currency, e.g. USDT). Current equity
+                             # = this + realized P&L, so sizing compounds wins / de-risks
+                             # losses. In live mode this is replaced by your real balance.
+  max_exposure_fraction: 1.0 # cap on total capital across all open positions, as a
+                             # fraction of equity. 1.0 = fully investable; lower to keep
+                             # dry powder. A new trade can never exceed the free cash.
   # starting assumptions used only until the journal has real stats:
   default_win_rate: 0.50
   default_reward_risk: 2.0

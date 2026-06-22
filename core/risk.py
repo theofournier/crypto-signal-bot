@@ -16,12 +16,24 @@ only if all pass, sizes the position:
 Fractional Kelly (PLAN §5.4):
 
     edge_fraction = win_rate - (1 - win_rate) / reward_risk_ratio
-    size = bankroll * kelly_fraction * max(edge_fraction, 0)
+    notional = current_equity * kelly_fraction * max(edge_fraction, 0)
+
+The stake is a fraction of **current equity** — the starting bankroll plus realized
+P&L reconstructed from the journal — so it **compounds after wins and de-risks after
+losses** rather than betting forever off a static number. The notional is then capped
+by the cash actually free to deploy: equity not already tied up in open positions,
+under a configured exposure ceiling. For spot long-or-flat you can never deploy more
+cash than you hold (FR-RM-1/3).
 
 ``win_rate`` and ``reward_risk_ratio`` are read from the ``trades`` journal so the
 gate self-calibrates as evidence accumulates. Until there are enough closed trades
 to trust (FR-LE-4: ≥ 100), it falls back to the configured starting assumptions —
 small samples are noise and must not drive sizing.
+
+Equity is journal-derived (no separate mutable balance row, so it stays auditable
+and reconstructable — FR-DP-3). In dry-run the starting balance is ``risk.bankroll``;
+Phase 11 (live) swaps that source for the exchange's real quote-currency balance,
+leaving everything downstream unchanged.
 
 This module reads the DB (journal + recent market rows) and returns a decision; it
 never places an order. Execution is ``execution/executor.py``.
@@ -57,8 +69,12 @@ class RiskConfig:
     min_edge_over_fees: float = 1.5
     default_win_rate: float = 0.50
     default_reward_risk: float = 2.0
-    bankroll: float = 10_000.0
+    bankroll: float = 10_000.0  # STARTING equity; current equity = this + realized P&L
     volatility_spike_mult: float = 2.5
+    # Ceiling on total capital deployed across all open positions, as a fraction of
+    # current equity. 1.0 = fully investable (available cash is the natural cap for
+    # spot); set < 1.0 to always hold dry powder.
+    max_exposure_fraction: float = 1.0
 
     @classmethod
     def from_config(cls, cfg: dict) -> "RiskConfig":
@@ -73,6 +89,7 @@ class RiskConfig:
             default_reward_risk=float(risk.get("default_reward_risk", 2.0)),
             bankroll=float(risk.get("bankroll", 10_000.0)),
             volatility_spike_mult=float(risk.get("volatility_spike_mult", 2.5)),
+            max_exposure_fraction=float(risk.get("max_exposure_fraction", 1.0)),
         )
 
 
@@ -154,7 +171,7 @@ class RiskGate:
                 win_rate, reward_risk,
             )
 
-        # 5. Sizing — fractional Kelly from measured (or default) edge.
+        # 5. Sizing — fractional Kelly on CURRENT equity, capped by available cash.
         edge_fraction = win_rate - (1.0 - win_rate) / reward_risk
         if edge_fraction <= 0.0:
             return self._block(
@@ -162,15 +179,35 @@ class RiskGate:
                 f"=> edge {edge_fraction:.3f}",
                 win_rate, reward_risk,
             )
-        notional = self.cfg.bankroll * self.cfg.kelly_fraction * edge_fraction
+
+        # Bet a fraction of current equity (bankroll + realized P&L) so the stake
+        # compounds after wins and de-risks after losses (FR-RM-3), then cap it by the
+        # cash actually free to deploy — equity not already tied up in open positions,
+        # under the exposure ceiling. You can never deploy more cash than you hold.
+        equity = self._current_equity()
+        if equity <= 0.0:
+            return self._block(f"account equity depleted ({equity:.2f})", win_rate, reward_risk)
+
+        kelly_notional = equity * self.cfg.kelly_fraction * edge_fraction
+        deployed = self._deployed_capital()
+        free_cash = min(equity * self.cfg.max_exposure_fraction, equity) - deployed
+        if free_cash <= 0.0:
+            return self._block(
+                f"no capital free: deployed {deployed:.2f} of equity {equity:.2f} "
+                f"(exposure ceiling {self.cfg.max_exposure_fraction:.0%})",
+                win_rate, reward_risk,
+            )
+        notional = min(kelly_notional, free_cash)
         size = notional / entry_price if entry_price else 0.0
         if size <= 0.0:
             return self._block("computed size is zero", win_rate, reward_risk)
 
+        capped = " (capped by free cash)" if notional < kelly_notional else ""
         reason = (
-            f"approved: size {size:.8f} (notional {notional:.2f}); "
-            f"Kelly {self.cfg.kelly_fraction} x edge {edge_fraction:.3f} "
-            f"(win_rate {win_rate:.2f}, RR {reward_risk:.2f}); "
+            f"approved: size {size:.8f} (notional {notional:.2f}{capped}); "
+            f"Kelly {self.cfg.kelly_fraction} x edge {edge_fraction:.3f} on equity "
+            f"{equity:.2f} (win_rate {win_rate:.2f}, RR {reward_risk:.2f}); "
+            f"deployed {deployed:.2f}, free {free_cash:.2f}; "
             f"expected move {expected_move:.4%} >= {min_move:.4%}; "
             f"open {open_count}/{self.cfg.max_open_positions}, drawdown {drawdown:.1%}"
         )
@@ -185,6 +222,37 @@ class RiskGate:
             (self.mode,),
         )
         return int(rows[0]["n"]) if rows else 0
+
+    # ── account equity & capital deployment ────────────────────────────
+    def _realized_pnl(self) -> float:
+        """Net realized P&L (already fee-inclusive) over closed trades, this mode."""
+        rows = db.query(
+            self.conn,
+            "SELECT COALESCE(SUM(pnl), 0.0) AS total FROM trades "
+            "WHERE status = 'closed' AND mode = ? AND pnl IS NOT NULL",
+            (self.mode,),
+        )
+        return float(rows[0]["total"]) if rows else 0.0
+
+    def _current_equity(self) -> float:
+        """Equity backing position sizing: starting bankroll + realized P&L.
+
+        Reconstructed from the journal so it compounds wins and shrinks after losses
+        with no extra mutable state (matches ``_current_drawdown``'s equity curve and
+        the postmortem's, so sizing, drawdown, and the report all agree). Phase 11
+        swaps the bankroll term for the exchange's live balance; nothing else changes.
+        """
+        return self.cfg.bankroll + self._realized_pnl()
+
+    def _deployed_capital(self) -> float:
+        """Cash tied up in currently-open positions (entry notional), this mode."""
+        rows = db.query(
+            self.conn,
+            "SELECT COALESCE(SUM(entry_price * size), 0.0) AS total FROM trades "
+            "WHERE status = 'open' AND mode = ?",
+            (self.mode,),
+        )
+        return float(rows[0]["total"]) if rows else 0.0
 
     def _current_drawdown(self) -> float:
         """Peak-to-trough decline of realized equity, as a fraction of the peak.

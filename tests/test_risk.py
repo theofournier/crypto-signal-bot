@@ -37,10 +37,11 @@ def gate(conn, **over):
     return risk.RiskGate(conn, rc(**over), mode="dry")
 
 
-def open_trade_row(symbol="ETH/USDT", status="open", pnl=None, mode="dry", exit_ts=0):
+def open_trade_row(symbol="ETH/USDT", status="open", pnl=None, mode="dry", exit_ts=0,
+                   entry_price=100.0, size=1.0):
     return {
         "signal_id": None, "symbol": symbol, "direction": "long", "mode": mode,
-        "entry_ts": 1, "entry_price": 100.0, "size": 1.0, "stop_loss": 95.0,
+        "entry_ts": 1, "entry_price": entry_price, "size": size, "stop_loss": 95.0,
         "take_profit": 110.0, "exit_ts": exit_ts, "exit_price": None,
         "exit_reason": None, "pnl": pnl, "pnl_pct": None, "status": status, "win": None,
     }
@@ -130,3 +131,73 @@ def test_below_sample_threshold_keeps_using_defaults(conn):
         db.insert(conn, "trades", open_trade_row(status="closed", pnl=200.0, exit_ts=i))
     d = gate(conn).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
     assert d.win_rate == 0.50 and d.reward_risk == 2.0
+
+
+# ── equity-aware sizing & capital-based exposure (FR-RM-1/3) ──────────
+# Base size with empty journal: equity 10000 * kelly 0.25 * edge 0.25 / entry 100.
+BASE_SIZE = (10_000.0 * 0.25 * 0.25) / ENTRY  # = 6.25
+
+
+def test_sizes_off_starting_equity_when_journal_empty(conn):
+    # No closed trades, no open positions => equity == bankroll, size == baseline.
+    d = gate(conn).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
+    assert d.size == pytest.approx(BASE_SIZE)
+
+
+def test_stake_compounds_after_realized_wins(conn):
+    # +5000 realized (still < 100 trades, so edge stays at the 0.25 default) lifts
+    # equity to 15000, so the Kelly stake grows proportionally — the bet compounds.
+    for i in range(5):
+        db.insert(conn, "trades", open_trade_row(status="closed", pnl=1000.0, exit_ts=i))
+    d = gate(conn).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
+    assert d.approved is True
+    assert d.size == pytest.approx((15_000.0 * 0.25 * 0.25) / ENTRY)
+    assert d.size > BASE_SIZE
+
+
+def test_stake_derisks_after_realized_losses(conn):
+    # -1000 realized (10% drawdown, under the 15% pause) drops equity to 9000, so the
+    # stake shrinks — the gate bets less of a smaller account, not a static bankroll.
+    db.insert(conn, "trades", open_trade_row(status="closed", pnl=-1000.0, exit_ts=1))
+    d = gate(conn).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
+    assert d.approved is True
+    assert d.size == pytest.approx((9_000.0 * 0.25 * 0.25) / ENTRY)
+    assert d.size < BASE_SIZE
+
+
+def test_size_capped_to_free_cash_when_capital_deployed(conn):
+    # One open position already ties up 9800 of the 10000 equity (98 units @ 100).
+    # Free cash is 200, below the 625 Kelly notional, so the new trade is capped to
+    # 200/entry and the reason flags it. (max_open_positions raised so the count
+    # check doesn't block first.)
+    db.insert(conn, "trades", open_trade_row(status="open", entry_price=100.0, size=98.0))
+    d = gate(conn, max_open_positions=5).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
+    assert d.approved is True
+    assert d.size == pytest.approx(200.0 / ENTRY)
+    assert "capped by free cash" in d.reason
+
+
+def test_blocks_when_no_free_cash(conn):
+    # Open positions deploy the entire equity => no cash to open another (FR-RM-1).
+    db.insert(conn, "trades", open_trade_row(status="open", entry_price=100.0, size=100.0))
+    d = gate(conn, max_open_positions=5).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
+    assert d.approved is False and "no capital free" in d.reason
+
+
+def test_max_exposure_fraction_limits_total_deployment(conn):
+    # Exposure ceiling 0.5 => only 5000 of 10000 may be deployed. With 4900 already
+    # in an open position, just 100 is free, capping the new trade below its Kelly size.
+    db.insert(conn, "trades", open_trade_row(status="open", entry_price=100.0, size=49.0))
+    d = gate(conn, max_open_positions=5, max_exposure_fraction=0.5).assess(
+        "BTC/USDT", "1h", ENTRY, TP, FEE
+    )
+    assert d.approved is True
+    assert d.size == pytest.approx(100.0 / ENTRY)
+
+
+def test_blocks_when_equity_depleted(conn):
+    # Catastrophic realized losses wipe equity below zero => nothing to size, block.
+    # Drawdown pause is lifted so we reach the equity guard specifically.
+    db.insert(conn, "trades", open_trade_row(status="closed", pnl=-10_500.0, exit_ts=1))
+    d = gate(conn, max_drawdown_pause=10.0).assess("BTC/USDT", "1h", ENTRY, TP, FEE)
+    assert d.approved is False and "equity depleted" in d.reason
