@@ -165,7 +165,7 @@ def evaluate(
     # Long-or-flat: we only ever emit "long". Anything else is no-action.
     direction = LONG if gate_passed else NONE
 
-    reason = _reason(composite, cfg, above_threshold, agree_long, active, market)
+    reason = _reason(composite, cfg, above_threshold, agree_long, active)
     return Evaluation(
         ts=int(market_row["ts"]),  # type: ignore[arg-type]
         symbol=str(market_row["symbol"]),
@@ -185,7 +185,6 @@ def _reason(
     above_threshold: bool,
     agree_long: bool,
     active: list[SubScore],
-    market: SubScore,
 ) -> str:
     """Build the human-readable explanation stored on every signal (FR-SG-3/4).
 
@@ -202,5 +201,9 @@ def _reason(
     if not above_threshold:
         blockers.append(f"composite {composite:.1f} < threshold {cfg.threshold:.0f}")
     if cfg.require_agreement and not agree_long:
-        blockers.append(f"active sources do not all agree long (market={market.direction})")
+        if not active:
+            blockers.append("no active sources to agree (all inactive)")
+        else:
+            dissent = ", ".join(f"{s.name}={s.direction}" for s in active if s.direction != LONG)
+            blockers.append(f"active sources do not all agree long ({dissent})")
     return f"no signal: {'; '.join(blockers)}. [{votes}]"

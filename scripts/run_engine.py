@@ -48,6 +48,13 @@ log = logging.getLogger("run_engine")
 # How many recent candles to pull as context for ATR / volatility checks.
 CONTEXT_CANDLES = 60
 
+# How far (in candle periods) an on-chain / sentiment observation may trail the
+# candle being scored before it is treated as STALE and ignored. The collectors
+# poll well inside one period, so a fresh row always exists while they run; a
+# paused/dead collector ages out within a few periods, degrading the gate to the
+# sources still fresh (FR-DC-4) rather than letting hours-old data vote.
+SOURCE_STALE_PERIODS = 3
+
 
 @dataclass
 class ExecutionContext:
@@ -105,6 +112,23 @@ def recent_market_rows(conn, symbol: str, timeframe: str, limit: int = CONTEXT_C
     return list(reversed(rows))
 
 
+def latest_fresh_source_row(conn, table: str, symbol: str, since_ts: int):
+    """The newest ``onchain_data``/``sentiment_data`` row for a pair at/after
+    ``since_ts``, or None if the source has no fresh observation.
+
+    Bounding by ``since_ts`` (the candle ts minus a staleness window) is what makes
+    a paused collector degrade gracefully: with no fresh row the source falls back
+    to an inactive sub-score that neither votes nor blocks (FR-DC-4). ``table`` is a
+    fixed internal identifier, never user input.
+    """
+    rows = db.query(
+        conn,
+        f"SELECT * FROM {table} WHERE symbol = ? AND ts >= ? ORDER BY ts DESC LIMIT 1",
+        (symbol, since_ts),
+    )
+    return rows[0] if rows else None
+
+
 def evaluate_pair(
     conn,
     symbol: str,
@@ -128,7 +152,14 @@ def evaluate_pair(
         log.debug("%s: candle %s already evaluated — skipping", symbol, market_row["ts"])
         return False
 
-    evaluation = scoring.evaluate(market_row, cfg)
+    # Phase 9: fuse all three sources. Pull the freshest on-chain & sentiment rows
+    # for this pair (ignoring stale ones, so a paused collector simply drops out of
+    # the gate); None for either means that source scores inactive (FR-DC-4).
+    since_ts = int(market_row["ts"]) - SOURCE_STALE_PERIODS * seed.timeframe_seconds(timeframe)
+    onchain_row = latest_fresh_source_row(conn, "onchain_data", symbol, since_ts)
+    sentiment_row = latest_fresh_source_row(conn, "sentiment_data", symbol, since_ts)
+
+    evaluation = scoring.evaluate(market_row, cfg, onchain_row, sentiment_row)
     signal_id = db.insert(conn, "signals", evaluation.as_row())
     log.info(
         "%s @ %s: %s | %s",

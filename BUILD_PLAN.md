@@ -180,8 +180,8 @@ are consistent, and you trust the loop. **This is the gate before adding complex
 - [x] Write `collectors/onchain_collector.py` (DefiLlama/Etherscan → `onchain_data`).
 - [x] Write `collectors/sentiment_collector.py` (Reddit/TG/RSS + classifier → `sentiment_data`).
       Seed historical sentiment from Fear & Greed + a Kaggle dataset for the classifier.
-- [ ] Make `core/normalize.py` produce real on-chain & sentiment sub-scores.
-- [ ] Now the gate's "all three agree" requirement is fully active — re-validate in dry-run.
+- [x] Make `core/normalize.py` produce real on-chain & sentiment sub-scores.
+- [x] Now the gate's "all three agree" requirement is fully active — re-validate in dry-run.
 
 **Done when:** all three collectors feed the engine, the multi-source gate is live, and the
 widened system has been re-validated in dry-run.

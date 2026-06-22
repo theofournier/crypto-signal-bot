@@ -63,12 +63,19 @@ services:
     restart: "no"
     command: python scripts/init_db.py
 
-  seed:
+  seeddata:
     <<: *bot-common
-    container_name: bot-seed
+    container_name: bot-seed-data
     profiles: ["tools"]
     restart: "no"
     command: python scripts/seed_data.py
+
+  seedsentiment:
+    <<: *bot-common
+    container_name: bot-seed-sentiment
+    profiles: ["tools"]
+    restart: "no"
+    command: python scripts/seed_sentiment.py
 
   postmortem:
     <<: *bot-common
