@@ -51,11 +51,6 @@ services:
     depends_on:
       - collectors
 
-  # ── One-shot helpers — run on demand, never with `up`. ──
-  #   docker compose run --rm init
-  #   docker compose run --rm postmortem --days 7 --telegram
-  #   docker compose run --rm backtest --pair BTC/USDT --compare
-  #   docker compose run --rm seed
   init:
     <<: *bot-common
     container_name: bot-init
@@ -91,6 +86,53 @@ services:
     restart: "no"
     command: python scripts/run_backtest.py
 
+  # ── Local LLM for sentiment (opt-in) ──
+  #   docker compose --profile llm up -d                  # start the server
+  #   docker compose --profile llm run --rm ollama-pull   # pull the model once
+  # Internal only — NO ports published; the collectors reach it at
+  # http://ollama:11434 over botnet. If it isn't running, the sentiment classifier
+  # falls back to the rule-based lexicon, so this service is purely additive.
+  # Enable it by setting sentiment.classifier.type: "ollama" and
+  # base_url: "http://ollama:11434" in config.yaml.
+  ollama:
+    image: ollama/ollama:latest         # prebuilt; unrelated to the bot image
+    container_name: bot-ollama
+    profiles: ["llm"]
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama     # persist pulled models across restarts
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # GPU (optional, NVIDIA): uncomment to accelerate; CPU is fine for 3B models.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - {driver: nvidia, count: 1, capabilities: [gpu]}
+
+  # One-shot: pull the model into the volume (run once after the server is up).
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: bot-ollama-pull
+    profiles: ["llm"]
+    restart: "no"
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"  # talk to the server, don't start a new one
+    entrypoint: ["ollama", "pull", "llama3.2:3b"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - botnet
+
 networks:
   botnet:
     driver: bridge          # private; nothing is published onto it
+
+volumes:
+  ollama-models:            # named volume for pulled LLM models (can be GBs)

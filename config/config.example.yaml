@@ -150,7 +150,9 @@ sentiment:
     extra_bearish: []        # additional bearish keywords (lexicon)
     ollama:                  # used only when type: "ollama"
       model: "llama3.2:3b"   # any model you've pulled: `ollama pull llama3.2:3b`
-      base_url: "http://localhost:11434"   # local Ollama server
+      # Local run: "http://localhost:11434". Docker: use the service name instead,
+      # "http://ollama:11434" (see the `ollama` service in docker-compose.yml).
+      base_url: "http://localhost:11434"
       timeout: 30            # seconds per classification request
       cache_size: 2048       # remember recent verdicts so recurring posts cost 1 call
 

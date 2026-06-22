@@ -101,6 +101,18 @@ python3 scripts/run_collectors.py --no-market --no-onchain --pair BTC/USDT --onc
 Keep `ollama serve` running alongside the bot (a `systemd`/`tmux` unit, like the bot itself).
 Verdicts are cached per item, so recurring headlines don't re-prompt the model.
 
+**Running under Docker instead?** The compose stack ships an opt-in `ollama` service
+(internal-only, no published ports). Set `base_url: "http://ollama:11434"` in `config.yaml`,
+then:
+
+```bash
+docker compose --profile llm up -d                  # start the Ollama server
+docker compose --profile llm run --rm ollama-pull   # pull llama3.2:3b into its volume (once)
+docker compose up -d                                 # (re)start collectors + engine
+```
+
+The model is cached in the `ollama-models` volume, so it isn't re-downloaded on redeploy.
+
 ---
 
 ## Docker deployment (VPS)
