@@ -19,6 +19,9 @@ config/secrets.env
 # Database = trade journal + full history (private)
 storage.db
 *.db
+
+# Local-only pull_db.sh config (holds VPS host/path)
+scripts/.pull-db.env
 *.sqlite
 *.sqlite3
 
