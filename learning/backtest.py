@@ -47,7 +47,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core import risk, scoring  # noqa: E402
-from data import db  # noqa: E402
+from data import db, seed  # noqa: E402
 from exchange.client import ExchangeClient, Fees  # noqa: E402
 from execution import executor, monitor  # noqa: E402
 from learning import postmortem  # noqa: E402
@@ -57,6 +57,11 @@ log = logging.getLogger("backtest")
 # How many recent candles to pull as context for the ATR-based stop (mirrors
 # run_engine.CONTEXT_CANDLES so the backtest sizes stops exactly as the live loop).
 CONTEXT_CANDLES = 60
+
+# Staleness window for the auxiliary sources, in candle periods — mirrors
+# run_engine.SOURCE_STALE_PERIODS so the backtest drops a stale on-chain/sentiment
+# observation to "inactive" exactly as the live loop does (FR-DC-4).
+SOURCE_STALE_PERIODS = 3
 
 # Columns we copy from a source market_data row into the scratch DB. ``id`` is
 # dropped so the scratch table assigns its own ids.
@@ -142,11 +147,54 @@ def _market_insert_row(candle) -> dict:
     return {col: candle[col] for col in _MARKET_COLUMNS}
 
 
+def _load_source_rows(conn, table: str, symbol: str) -> list:
+    """All rows for a pair from an auxiliary source table, oldest first (read-only).
+
+    Replays ``onchain_data`` / ``sentiment_data`` alongside the market candles so the
+    backtest fuses the same three sources the live loop does
+    (``run_engine.evaluate_pair``) rather than scoring market-only. ``table`` is a
+    fixed internal identifier, never user input.
+    """
+    return db.query(
+        conn,
+        f"SELECT * FROM {table} WHERE symbol = ? ORDER BY ts",  # noqa: S608 - fixed identifier
+        (symbol,),
+    )
+
+
+class _SourceFeed:
+    """Replays one auxiliary source (on-chain/sentiment) against the market clock.
+
+    Holds the source's rows oldest-first with a forward-only cursor, so ``at(ts)``
+    returns the freshest observation **at or before** the current candle — never a
+    future row (leakage-safe, NFR-TEST/G4). A row older than the staleness window is
+    treated as absent (``None``), so the source scores inactive exactly as
+    ``run_engine.latest_fresh_source_row`` drops a paused collector (FR-DC-4). The
+    candle timestamps drive the replay in ascending order, so the cursor only ever
+    advances — O(n) over the whole backtest.
+    """
+
+    def __init__(self, rows: list, stale_seconds: int) -> None:
+        self._rows = rows
+        self._stale = stale_seconds
+        self._i = 0
+
+    def at(self, ts: int):
+        while self._i < len(self._rows) and int(self._rows[self._i]["ts"]) <= ts:
+            self._i += 1
+        if self._i == 0:
+            return None
+        row = self._rows[self._i - 1]
+        return row if int(row["ts"]) >= ts - self._stale else None
+
+
 def run_replay(
     rows,
     cfg: dict,
     symbol: str,
     timeframe: str,
+    onchain_rows: list | None = None,
+    sentiment_rows: list | None = None,
 ) -> BacktestResult:
     """Replay ``rows`` (chronological candles) through the live engine pipeline.
 
@@ -170,6 +218,12 @@ def run_replay(
     scratch = db.connect(":memory:")
     risk_gate = risk.RiskGate(scratch, risk.RiskConfig.from_config(cfg), mode=client.mode)
 
+    # Replay the auxiliary sources alongside the candles so entry scoring fuses all
+    # three sources exactly as run_engine.evaluate_pair does (G4: identical pipeline).
+    stale_seconds = SOURCE_STALE_PERIODS * seed.timeframe_seconds(timeframe)
+    onchain_feed = _SourceFeed(onchain_rows or [], stale_seconds)
+    sentiment_feed = _SourceFeed(sentiment_rows or [], stale_seconds)
+
     n_signals = 0
     try:
         for candle in rows:
@@ -178,7 +232,11 @@ def run_replay(
             db.insert(scratch, "market_data", _market_insert_row(candle))
 
             # 1. Score the just-closed candle and persist the signal (fire or not).
-            evaluation = scoring.evaluate(candle, scoring_cfg)
+            #    Fuse the freshest on-chain/sentiment observation at-or-before this
+            #    candle (leakage-safe); a stale/absent source scores inactive.
+            onchain_row = onchain_feed.at(ts)
+            sentiment_row = sentiment_feed.at(ts)
+            evaluation = scoring.evaluate(candle, scoring_cfg, onchain_row, sentiment_row)
             signal_id = db.insert(scratch, "signals", evaluation.as_row())
             n_signals += 1
 
@@ -232,8 +290,13 @@ def backtest(
 ) -> BacktestResult:
     """Load history for a pair from ``conn`` and replay it (load + run_replay)."""
     rows = load_market_rows(conn, symbol, timeframe, since_ts, until_ts)
-    log.info("backtest %s @ %s: %d candle(s)", symbol, timeframe, len(rows))
-    return run_replay(rows, cfg, symbol, timeframe)
+    onchain_rows = _load_source_rows(conn, "onchain_data", symbol)
+    sentiment_rows = _load_source_rows(conn, "sentiment_data", symbol)
+    log.info(
+        "backtest %s @ %s: %d candle(s), %d on-chain, %d sentiment",
+        symbol, timeframe, len(rows), len(onchain_rows), len(sentiment_rows),
+    )
+    return run_replay(rows, cfg, symbol, timeframe, onchain_rows, sentiment_rows)
 
 
 def main(argv=None) -> int:
