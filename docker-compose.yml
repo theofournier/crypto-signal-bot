@@ -159,6 +159,8 @@ services:
 networks:
   botnet:
     driver: bridge          # private; nothing is published onto it
+  proxy:
+    external: true
 
 volumes:
   ollama-models:            # named volume for pulled LLM models (can be GBs)
