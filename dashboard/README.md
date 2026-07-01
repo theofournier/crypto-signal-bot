@@ -25,6 +25,19 @@ By default it reads `../storage.db` (the project root). Point it elsewhere with:
 CRYPTOBOT_DB=/path/to/storage.db npm run dev
 ```
 
+### Docker
+
+Runs behind the `dashboard` profile in the project's root `docker-compose.yml`:
+
+```bash
+docker compose --profile dashboard up -d --build dashboard
+# → http://127.0.0.1:8080   (override the host port with DASHBOARD_PORT)
+```
+
+It mounts `storage.db` **read-only** and publishes its port on loopback only
+(`127.0.0.1`), so it stays off the network by default. Change the host port with
+`DASHBOARD_PORT=9000 docker compose --profile dashboard up -d dashboard`.
+
 ## Pages
 
 | Route        | Shows |

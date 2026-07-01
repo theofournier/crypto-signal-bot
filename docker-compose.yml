@@ -13,6 +13,12 @@
 #   - engine     → the only reader; scores, gates, (dry-run) executes
 #  Plus two one-shot helpers behind the `tools` profile: init, postmortem.
 #
+#  Opt-in read-only dashboard behind the `dashboard` profile:
+#     docker compose --profile dashboard up -d --build dashboard
+#   It is the ONE service with an inbound port — deliberately published on
+#   127.0.0.1 only (loopback), so it is reachable from the host but never
+#   exposed on the network. It opens storage.db read-only and never writes.
+#
 #  First-run + usage instructions are in README / the deploy notes.
 # ──────────────────────────────────────────────────────────────
 
@@ -85,6 +91,26 @@ services:
     profiles: ["tools"]
     restart: "no"
     command: python scripts/run_backtest.py
+
+
+  dashboard:
+    build:
+      context: ./dashboard
+    image: crypto-signal-bot-dashboard:latest
+    container_name: bot-dashboard
+    profiles: ["dashboard"]
+    restart: unless-stopped
+    volumes:
+      - ./storage.db:/app/storage.db:ro   # the journal, read-only
+    networks:
+      - botnet
+      - proxy
+    labels:
+      traefik.enable: true
+      traefik.http.routers.crypto-bot.rule: "Host(`crypto-bot-private.${DOMAIN}`)"
+      traefik.http.routers.crypto-bot.entrypoints: "web"
+      traefik.http.routers.crypto-bot.middlewares: "security-headers@file"
+      traefik.http.services.crypto-bot.loadbalancer.server.port: 3000
 
   # ── Local LLM for sentiment (opt-in) ──
   #   docker compose --profile llm up -d                  # start the server

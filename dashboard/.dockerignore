@@ -1,0 +1,15 @@
+# Keep the build context small and free of local artifacts.
+node_modules
+.svelte-kit
+build
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Never pull the private journal into the image build context — it is supplied
+# at runtime as a read-only bind-mount.
+storage.db
+*.db
+*.sqlite
