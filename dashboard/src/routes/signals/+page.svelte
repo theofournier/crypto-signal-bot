@@ -1,15 +1,20 @@
 <script lang="ts">
 	import type { PageProps } from './$types';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import ScoreBar from '$lib/components/ScoreBar.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
+	import DateFilter from '$lib/components/DateFilter.svelte';
 	import { fmtDate, fmtNum, directionColor } from '$lib/format';
 
 	let { data }: PageProps = $props();
 
 	function filter(e: Event) {
+		const p = new URLSearchParams(page.url.searchParams);
 		const v = (e.currentTarget as HTMLSelectElement).value;
-		goto(v ? `/signals?symbol=${encodeURIComponent(v)}` : '/signals', { keepFocus: true });
+		if (v) p.set('symbol', v);
+		else p.delete('symbol');
+		goto(`?${p.toString()}`, { keepFocus: true, noScroll: true });
 	}
 
 	// composite trend is only meaningful for a single symbol (chronological)
@@ -39,11 +44,14 @@
 				{#each data.symbols as s (s)}<option value={s}>{s}</option>{/each}
 			</select>
 		</label>
-		<span class="muted">
-			{fmtNum(data.stats.total, 0)} total · {fmtNum(data.stats.gated ?? 0, 0)} gated · threshold
-			<span class="mono">{data.threshold ?? '—'}</span>
-		</span>
+		{#if data.range}
+			<DateFilter from={data.range.from} to={data.range.to} min={data.range.min} max={data.range.max} />
+		{/if}
 	</div>
+	<p class="sub" style="margin:-0.5rem 0 1rem">
+		{fmtNum(data.signals.length, 0)} in range · {fmtNum(data.stats.total, 0)} total ·
+		{fmtNum(data.stats.gated ?? 0, 0)} gated · threshold <span class="mono">{data.threshold ?? '—'}</span>
+	</p>
 
 	{#if data.symbol && trend.length > 1}
 		<div class="card" style="margin-bottom:1rem">

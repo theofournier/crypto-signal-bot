@@ -1,20 +1,19 @@
 <script lang="ts">
 	import type { PageProps } from './$types';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import CandleChart from '$lib/components/CandleChart.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
 	import KpiCard from '$lib/components/KpiCard.svelte';
+	import DateFilter from '$lib/components/DateFilter.svelte';
 	import { fmtPrice, fmtNum, fmtDate } from '$lib/format';
 
 	let { data }: PageProps = $props();
 
 	function pick(e: Event) {
-		const s = (e.currentTarget as HTMLSelectElement).value;
-		goto(`/market?symbol=${encodeURIComponent(s)}&limit=${data.limit}`, { keepFocus: true });
-	}
-	function setLimit(e: Event) {
-		const l = (e.currentTarget as HTMLSelectElement).value;
-		goto(`/market?symbol=${encodeURIComponent(data.symbol)}&limit=${l}`, { keepFocus: true });
+		const p = new URLSearchParams(page.url.searchParams);
+		p.set('symbol', (e.currentTarget as HTMLSelectElement).value);
+		goto(`?${p.toString()}`, { keepFocus: true, noScroll: true });
 	}
 
 	const rsi = $derived(data.candles.filter((c) => c.rsi !== null).map((c) => ({ x: c.ts, y: c.rsi as number })));
@@ -32,11 +31,9 @@
 				{#each data.symbols as s (s)}<option value={s}>{s}</option>{/each}
 			</select>
 		</label>
-		<label>Candles
-			<select onchange={setLimit} value={String(data.limit)}>
-				{#each [100, 300, 500, 1000] as n (n)}<option value={String(n)}>{n}</option>{/each}
-			</select>
-		</label>
+		{#if data.range}
+			<DateFilter from={data.range.from} to={data.range.to} min={data.range.min} max={data.range.max} />
+		{/if}
 	</div>
 
 	{#if l}

@@ -9,6 +9,6 @@ export const load: PageServerLoad = () => {
 		signalStats: db.signalStats(),
 		tradeStats: db.tradeStats(),
 		threshold: db.inferredThreshold(),
-		fearGreed: db.fearGreedSeries(240).map((s) => ({ x: s.ts, y: s.sentiment_score ?? 0 }))
+		fearGreed: db.fearGreedSeries({ limit: 240 }).map((s) => ({ x: s.ts, y: s.sentiment_score ?? 0 }))
 	};
 };

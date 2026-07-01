@@ -1,14 +1,17 @@
 <script lang="ts">
 	import type { PageProps } from './$types';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import LineChart from '$lib/components/LineChart.svelte';
+	import DateFilter from '$lib/components/DateFilter.svelte';
 	import { fmtNum } from '$lib/format';
 
 	let { data }: PageProps = $props();
 
 	function pick(e: Event) {
-		const v = (e.currentTarget as HTMLSelectElement).value;
-		goto(`/sentiment?symbol=${encodeURIComponent(v)}`, { keepFocus: true });
+		const p = new URLSearchParams(page.url.searchParams);
+		p.set('symbol', (e.currentTarget as HTMLSelectElement).value);
+		goto(`?${p.toString()}`, { keepFocus: true, noScroll: true });
 	}
 
 	const symScore = $derived(data.series.map((s) => ({ x: s.ts, y: s.sentiment_score ?? 0 })));
@@ -19,6 +22,12 @@
 <div class="page">
 	<h1>Sentiment</h1>
 	<p class="sub">Social &amp; market mood reduced to a directional score with credibility and novelty.</p>
+
+	{#if data.range}
+		<div class="controls">
+			<DateFilter from={data.range.from} to={data.range.to} min={data.range.min} max={data.range.max} />
+		</div>
+	{/if}
 
 	<div class="card" style="margin-bottom:1rem">
 		<h2 style="margin-top:0">Fear &amp; Greed index</h2>

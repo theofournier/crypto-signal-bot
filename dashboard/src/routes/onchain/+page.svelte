@@ -1,14 +1,17 @@
 <script lang="ts">
 	import type { PageProps } from './$types';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import LineChart from '$lib/components/LineChart.svelte';
+	import DateFilter from '$lib/components/DateFilter.svelte';
 	import { fmtDate, fmtUsd, fmtNum } from '$lib/format';
 
 	let { data }: PageProps = $props();
 
 	function pick(e: Event) {
-		const v = (e.currentTarget as HTMLSelectElement).value;
-		goto(`/onchain?symbol=${encodeURIComponent(v)}`, { keepFocus: true });
+		const p = new URLSearchParams(page.url.searchParams);
+		p.set('symbol', (e.currentTarget as HTMLSelectElement).value);
+		goto(`?${p.toString()}`, { keepFocus: true, noScroll: true });
 	}
 
 	const netFlow = $derived(data.rows.map((r) => ({ x: r.ts, y: r.net_flow ?? 0 })));
@@ -50,6 +53,9 @@
 				{#each data.symbols as s (s)}<option value={s}>{s}</option>{/each}
 			</select>
 		</label>
+		{#if data.range}
+			<DateFilter from={data.range.from} to={data.range.to} min={data.range.min} max={data.range.max} />
+		{/if}
 	</div>
 
 	{#if data.rows.length === 0}

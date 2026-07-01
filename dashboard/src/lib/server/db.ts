@@ -132,6 +132,24 @@ export function symbols(): string[] {
 	).map((r) => r.symbol);
 }
 
+/** Optional inclusive [from, to] unix-second window for time-series queries. */
+export interface Range {
+	from?: number;
+	to?: number;
+	limit?: number;
+}
+
+/** Min/max observation time for a table — used to bound the date filter. */
+export function tableRange(
+	table: 'market_data' | 'onchain_data' | 'sentiment_data' | 'signals'
+): { min_ts: number | null; max_ts: number | null } {
+	return (
+		one<{ min_ts: number | null; max_ts: number | null }>(
+			`SELECT MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM ${table}`
+		) ?? { min_ts: null, max_ts: null }
+	);
+}
+
 /** Latest signal evaluation per symbol. */
 export function latestSignals(): Signal[] {
 	return all<Signal>(
@@ -153,15 +171,24 @@ export function latestCandles(): Candle[] {
 }
 
 // ── Signals ─────────────────────────────────────────────────────────────
-export function signals(symbol: string | null, limit = 200): Signal[] {
+export function signals(symbol: string | null, range: Range = {}): Signal[] {
+	const { from, to, limit = 300 } = range;
+	const where: string[] = [];
+	const params: (string | number)[] = [];
 	if (symbol) {
-		return all<Signal>(
-			'SELECT * FROM signals WHERE symbol = ? ORDER BY ts DESC, id DESC LIMIT ?',
-			symbol,
-			limit
-		);
+		where.push('symbol = ?');
+		params.push(symbol);
 	}
-	return all<Signal>('SELECT * FROM signals ORDER BY ts DESC, id DESC LIMIT ?', limit);
+	if (from != null && to != null) {
+		where.push('ts BETWEEN ? AND ?');
+		params.push(from, to);
+	}
+	const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+	return all<Signal>(
+		`SELECT * FROM signals ${clause} ORDER BY ts DESC, id DESC LIMIT ?`,
+		...params,
+		limit
+	);
 }
 
 export function signalStats(): { total: number; gated: number; avg_composite: number | null; max_composite: number | null } {
@@ -186,7 +213,16 @@ export function inferredThreshold(): number | null {
 }
 
 // ── Market ──────────────────────────────────────────────────────────────
-export function candles(symbol: string, limit = 500): Candle[] {
+export function candles(symbol: string, range: Range = {}): Candle[] {
+	const { from, to, limit = 500 } = range;
+	if (from != null && to != null) {
+		return all<Candle>(
+			'SELECT * FROM market_data WHERE symbol = ? AND ts BETWEEN ? AND ? ORDER BY ts LIMIT 5000',
+			symbol,
+			from,
+			to
+		);
+	}
 	const rows = all<Candle>(
 		'SELECT * FROM market_data WHERE symbol = ? ORDER BY ts DESC LIMIT ?',
 		symbol,
@@ -196,7 +232,23 @@ export function candles(symbol: string, limit = 500): Candle[] {
 }
 
 // ── On-chain ────────────────────────────────────────────────────────────
-export function onchain(symbol: string | null, limit = 500): Onchain[] {
+export function onchain(symbol: string | null, range: Range = {}): Onchain[] {
+	const { from, to, limit = 500 } = range;
+	if (from != null && to != null) {
+		const rows = symbol
+			? all<Onchain>(
+					'SELECT * FROM onchain_data WHERE symbol = ? AND ts BETWEEN ? AND ? ORDER BY ts LIMIT 5000',
+					symbol,
+					from,
+					to
+				)
+			: all<Onchain>(
+					'SELECT * FROM onchain_data WHERE ts BETWEEN ? AND ? ORDER BY ts LIMIT 5000',
+					from,
+					to
+				);
+		return rows;
+	}
 	const rows = symbol
 		? all<Onchain>('SELECT * FROM onchain_data WHERE symbol = ? ORDER BY ts DESC LIMIT ?', symbol, limit)
 		: all<Onchain>('SELECT * FROM onchain_data ORDER BY ts DESC LIMIT ?', limit);
@@ -217,7 +269,15 @@ export function sentimentSources(): { source: string; n: number }[] {
 }
 
 /** Fear & Greed style market-wide series (source = fear_greed). */
-export function fearGreedSeries(limit = 400): Sentiment[] {
+export function fearGreedSeries(range: Range = {}): Sentiment[] {
+	const { from, to, limit = 400 } = range;
+	if (from != null && to != null) {
+		return all<Sentiment>(
+			"SELECT * FROM sentiment_data WHERE source = 'fear_greed' AND ts BETWEEN ? AND ? ORDER BY ts LIMIT 5000",
+			from,
+			to
+		);
+	}
 	const rows = all<Sentiment>(
 		"SELECT * FROM sentiment_data WHERE source = 'fear_greed' ORDER BY ts DESC LIMIT ?",
 		limit
@@ -225,7 +285,16 @@ export function fearGreedSeries(limit = 400): Sentiment[] {
 	return rows.reverse();
 }
 
-export function sentimentForSymbol(symbol: string, limit = 500): Sentiment[] {
+export function sentimentForSymbol(symbol: string, range: Range = {}): Sentiment[] {
+	const { from, to, limit = 500 } = range;
+	if (from != null && to != null) {
+		return all<Sentiment>(
+			"SELECT * FROM sentiment_data WHERE symbol = ? AND source != 'fear_greed' AND ts BETWEEN ? AND ? ORDER BY ts LIMIT 5000",
+			symbol,
+			from,
+			to
+		);
+	}
 	const rows = all<Sentiment>(
 		"SELECT * FROM sentiment_data WHERE symbol = ? AND source != 'fear_greed' ORDER BY ts DESC LIMIT ?",
 		symbol,
